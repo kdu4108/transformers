@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from ...utils import (
     OptionalDependencyNotAvailable,
     _LazyModule,
+    is_brunoflow_available,
     is_flax_available,
     is_tensorflow_text_available,
     is_tf_available,
@@ -43,12 +44,36 @@ else:
     _import_structure["tokenization_bert_fast"] = ["BertTokenizerFast"]
 
 try:
+    if not is_brunoflow_available():
+        raise OptionalDependencyNotAvailable()
+except OptionalDependencyNotAvailable:
+    pass
+else:
+    _import_structure["modeling_bf_bert"] = [
+        # "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
+        "BfBertEmbeddings"
+        # "BertForMaskedLM",
+        # "BertForMultipleChoice",
+        # "BertForNextSentencePrediction",
+        # "BertForPreTraining",
+        # "BertForQuestionAnswering",
+        # "BertForSequenceClassification",
+        # "BertForTokenClassification",
+        # "BertLayer",
+        # "BertLMHeadModel",
+        # "BertModel",
+        # "BertPreTrainedModel",
+        # "load_tf_weights_in_bert",
+    ]
+
+try:
     if not is_torch_available():
         raise OptionalDependencyNotAvailable()
 except OptionalDependencyNotAvailable:
     pass
 else:
     _import_structure["modeling_bert"] = [
+        "BertEmbeddings",
         "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
         "BertForMaskedLM",
         "BertForMultipleChoice",

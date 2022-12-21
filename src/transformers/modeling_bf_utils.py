@@ -448,11 +448,11 @@ def _load_state_dict_into_model(model_to_load, state_dict, start_prefix):
         if new_key:
             old_keys.append(key)
             new_keys.append(new_key)
-    for old_key, new_key in zip(old_keys, new_keys): # KD: probably stick with this
+    for old_key, new_key in zip(old_keys, new_keys):
         state_dict[new_key] = state_dict.pop(old_key)
 
     # copy state_dict so _load_from_state_dict can modify it
-    metadata = getattr(state_dict, "_metadata", None) # KD: something here is maybe important?
+    metadata = getattr(state_dict, "_metadata", None)
     state_dict = state_dict.copy()
     if metadata is not None:
         state_dict._metadata = metadata
@@ -482,13 +482,13 @@ def _load_state_dict_into_model(model_to_load, state_dict, start_prefix):
                         if torch.distributed.get_rank() == 0:
                             module._load_from_state_dict(*args)
             else:
-                module._load_from_state_dict(*args) # KD: module here (on first call) is going to be the entire Net (BFBertForMaskedLM), then will recur into sublayers
+                module._load_from_state_dict(*args)
 
         for name, child in module._modules.items():
             if child is not None:
                 load(child, state_dict, prefix + name + ".")
 
-    load(model_to_load, state_dict, prefix=start_prefix) # KD: actually load the weights in here!
+    load(model_to_load, state_dict, prefix=start_prefix)
     # Delete `state_dict` so it could be collected by GC earlier. Note that `state_dict` is a copy of the argument, so
     # it's safe to delete it.
     del state_dict
@@ -1147,7 +1147,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         """
         raise NotImplementedError(f"Make sure `_init_weights` is implemented for {self.__class__}")
 
-    def tie_weights(self): # KD: maybe this isn't necessary? not sure
+    def tie_weights(self):
         """
         Tie the weights between the input embeddings and the output embeddings.
 
@@ -1155,7 +1155,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         weights instead.
         """
         if getattr(self.config, "tie_word_embeddings", True):
-            output_embeddings = self.get_output_embeddings() # KD: maybe implement get_output_embeddings for BFBert?
+            output_embeddings = self.get_output_embeddings()
             if output_embeddings is not None:
                 self._tie_or_clone_weights(output_embeddings, self.get_input_embeddings())
 
@@ -1166,7 +1166,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
 
         for module in self.modules():
             if hasattr(module, "_tie_weights"):
-                module._tie_weights() # KD: hey, this never gets called apparently!
+                module._tie_weights()
 
     @staticmethod
     def _tie_encoder_decoder_weights(encoder: nn.Module, decoder: nn.Module, base_model_prefix: str):
@@ -1243,15 +1243,15 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 f"The following encoder weights were not tied to the decoder {uninitialized_encoder_weights}"
             )
 
-    def _tie_or_clone_weights(self, output_embeddings, input_embeddings): # KD: probably should be able to just get this for free?
+    def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
         """Tie or clone module weights depending of whether we are using TorchScript or not"""
         if self.config.torchscript:
             output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
         else:
             output_embeddings.weight = input_embeddings.weight
 
-        if getattr(output_embeddings, "bias", None) is not None: # KD: jk, might need to brunoflow-ify this
-            output_embeddings.bias.data = nn.functional.pad( # KD: yeah i think I need to implement pad :/
+        if getattr(output_embeddings, "bias", None) is not None:
+            output_embeddings.bias.data = nn.functional.pad(
                 output_embeddings.bias.data,
                 (
                     0,
@@ -1989,6 +1989,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         load_in_8bit_skip_modules = kwargs.pop("load_in_8bit_skip_modules", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
+        to_bf = kwargs.pop("to_bf", False) # whether to load pt weights into a brunoflow model
 
         if trust_remote_code is True:
             logger.warning(
@@ -2181,7 +2182,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                         _raise_exceptions_for_missing_entries=False,
                         _commit_hash=commit_hash,
                     )
-                    resolved_archive_file = cached_file(pretrained_model_name_or_path, filename, **cached_file_kwargs) # KD: this is where the file containing the model weights, pytorch.bin, is located and set.
+                    resolved_archive_file = cached_file(pretrained_model_name_or_path, filename, **cached_file_kwargs)
 
                     # Since we set _raise_exceptions_for_missing_entries=False, we don't get an exception but a None
                     # result when internet is up, the repo and revision exist, but the file does not.
@@ -2335,7 +2336,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             init_contexts.append(init_empty_weights())
 
         with ContextManagers(init_contexts):
-            model = cls(config, *model_args, **model_kwargs) # KD: substitute our BERT here! - since cls is basically self, if we inherit from PreTrainedModel, this will instantiate our new model.
+            model = cls(config, *model_args, **model_kwargs)
 
         # Check first if we are `from_pt`
         if use_keep_in_fp32_modules:
@@ -2439,43 +2440,45 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 )
                 raise
         elif from_pt:
+            if to_bf:
+                raise NotImplementedError("TODO! need to implement what to do to load a model in BF")
+            else:
+                # restore default dtype
+                if dtype_orig is not None:
+                    torch.set_default_dtype(dtype_orig)
 
-            # restore default dtype
-            if dtype_orig is not None:
-                torch.set_default_dtype(dtype_orig)
-
-            (
-                model,
-                missing_keys,
-                unexpected_keys,
-                mismatched_keys,
-                offload_index,
-                error_msgs,
-            ) = cls._load_pretrained_model(
-                model,
-                state_dict,
-                loaded_state_dict_keys,  # XXX: rename?
-                resolved_archive_file,
-                pretrained_model_name_or_path,
-                ignore_mismatched_sizes=ignore_mismatched_sizes,
-                sharded_metadata=sharded_metadata,
-                _fast_init=_fast_init,
-                low_cpu_mem_usage=low_cpu_mem_usage,
-                device_map=device_map,
-                offload_folder=offload_folder,
-                offload_state_dict=offload_state_dict,
-                dtype=torch_dtype,
-                load_in_8bit=load_in_8bit,
-                keep_in_fp32_modules=keep_in_fp32_modules,
-            )
+                (
+                    model,
+                    missing_keys,
+                    unexpected_keys,
+                    mismatched_keys,
+                    offload_index,
+                    error_msgs,
+                ) = cls._load_pretrained_model(
+                    model,
+                    state_dict,
+                    loaded_state_dict_keys,  # XXX: rename?
+                    resolved_archive_file,
+                    pretrained_model_name_or_path,
+                    ignore_mismatched_sizes=ignore_mismatched_sizes,
+                    sharded_metadata=sharded_metadata,
+                    _fast_init=_fast_init,
+                    low_cpu_mem_usage=low_cpu_mem_usage,
+                    device_map=device_map,
+                    offload_folder=offload_folder,
+                    offload_state_dict=offload_state_dict,
+                    dtype=torch_dtype,
+                    load_in_8bit=load_in_8bit,
+                    keep_in_fp32_modules=keep_in_fp32_modules,
+                )
 
         model.is_loaded_in_8bit = load_in_8bit
 
         # make sure token embedding weights are still tied if needed
-        model.tie_weights() # KD: todo to modify slightly for BF
+        model.tie_weights()
 
         # Set model in evaluation mode to deactivate DropOut modules by default
-        model.eval() # KD: implement this for models? maybe not urgent
+        model.eval()
 
         # Dispatch model with hooks on all devices if necessary
         if device_map is not None:
@@ -2609,7 +2612,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         if _fast_init:
             uninitialized_modules = model.retrieve_modules_from_names(
                 missing_keys, add_prefix=add_prefix_to_model, remove_prefix=remove_prefix_from_model
-            ) # KD: this is none so hopefully no problems
+            )
             for module in uninitialized_modules:
                 model._init_weights(module)
 
