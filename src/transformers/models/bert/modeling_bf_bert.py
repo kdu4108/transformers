@@ -172,7 +172,7 @@ class BfBertEmbeddings(Network):
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
         self.register_buffer("position_ids", bf.Node(jnp.expand_dims(jnp.arange(512), axis=0)))
         # self.position_ids = 
-        self.register_buffer("token_type_ids", bf.Node(jnp.zeros(self.position_ids.shape, dtype=jnp.int64)), persistent=False) # todo is this 64 bit necessary?
+        self.register_buffer("token_type_ids", jnp.zeros(self.position_ids.shape, dtype=jnp.int64), persistent=False) # todo is this 64 bit necessary?
         # self.token_type_ids =  
 
     def forward(
@@ -199,7 +199,7 @@ class BfBertEmbeddings(Network):
         if token_type_ids is None:
             if hasattr(self, "token_type_ids"):
                 buffered_token_type_ids = self.token_type_ids[:, :seq_length]
-                buffered_token_type_ids_expanded = bf.repeat(buffered_token_type_ids, n=input_shape[0], axis=0) 
+                buffered_token_type_ids_expanded = jnp.repeat(buffered_token_type_ids, repeats=input_shape[0], axis=0) 
                 token_type_ids = buffered_token_type_ids_expanded
             else:
                 token_type_ids = jnp.zeros(input_shape) #  dtype=torch.long,
