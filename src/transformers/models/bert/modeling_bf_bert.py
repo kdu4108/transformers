@@ -366,53 +366,53 @@ class BfBertSelfOutput(Network):
         return hidden_states
 
 
-# class BertAttention(nn.Module):
-#     def __init__(self, config, position_embedding_type=None):
-#         super().__init__()
-#         self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
-#         self.output = BertSelfOutput(config)
-#         self.pruned_heads = set()
+class BfBertAttention(Network):
+    def __init__(self, config, position_embedding_type=None):
+        super().__init__()
+        self.self = BfBertSelfAttention(config, position_embedding_type=position_embedding_type)
+        self.output = BfBertSelfOutput(config)
+        self.pruned_heads = set()
 
-#     def prune_heads(self, heads):
-#         if len(heads) == 0:
-#             return
-#         heads, index = find_pruneable_heads_and_indices(
-#             heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
-#         )
+    # def prune_heads(self, heads): TODO(KD): implement this when we want to do pruning experiments!
+    #     if len(heads) == 0:
+    #         return
+    #     heads, index = find_pruneable_heads_and_indices(
+    #         heads, self.self.num_attention_heads, self.self.attention_head_size, self.pruned_heads
+    #     )
 
-#         # Prune linear layers
-#         self.self.query = prune_linear_layer(self.self.query, index)
-#         self.self.key = prune_linear_layer(self.self.key, index)
-#         self.self.value = prune_linear_layer(self.self.value, index)
-#         self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
+    #     # Prune linear layers
+    #     self.self.query = prune_linear_layer(self.self.query, index)
+    #     self.self.key = prune_linear_layer(self.self.key, index)
+    #     self.self.value = prune_linear_layer(self.self.value, index)
+    #     self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
 
-#         # Update hyper params and store pruned heads
-#         self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
-#         self.self.all_head_size = self.self.attention_head_size * self.self.num_attention_heads
-#         self.pruned_heads = self.pruned_heads.union(heads)
+    #     # Update hyper params and store pruned heads
+    #     self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
+    #     self.self.all_head_size = self.self.attention_head_size * self.self.num_attention_heads
+    #     self.pruned_heads = self.pruned_heads.union(heads)
 
-#     def forward(
-#         self,
-#         hidden_states: torch.Tensor,
-#         attention_mask: Optional[torch.FloatTensor] = None,
-#         head_mask: Optional[torch.FloatTensor] = None,
-#         encoder_hidden_states: Optional[torch.FloatTensor] = None,
-#         encoder_attention_mask: Optional[torch.FloatTensor] = None,
-#         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-#         output_attentions: Optional[bool] = False,
-#     ) -> Tuple[torch.Tensor]:
-#         self_outputs = self.self(
-#             hidden_states,
-#             attention_mask,
-#             head_mask,
-#             encoder_hidden_states,
-#             encoder_attention_mask,
-#             past_key_value,
-#             output_attentions,
-#         )
-#         attention_output = self.output(self_outputs[0], hidden_states)
-#         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
-#         return outputs
+    def forward(
+        self,
+        hidden_states: bf.Node,
+        attention_mask: Optional[bf.Node] = None,
+        head_mask: Optional[bf.Node] = None,
+        encoder_hidden_states: Optional[bf.Node] = None,
+        encoder_attention_mask: Optional[bf.Node] = None,
+        past_key_value: Optional[Tuple[Tuple[bf.Node]]] = None,
+        output_attentions: Optional[bool] = False,
+    ) -> Tuple[bf.Node]:
+        self_outputs = self.self(
+            hidden_states,
+            attention_mask,
+            head_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            past_key_value,
+            output_attentions,
+        )
+        attention_output = self.output(self_outputs[0], hidden_states)
+        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        return outputs
 
 
 # class BertIntermediate(nn.Module):
