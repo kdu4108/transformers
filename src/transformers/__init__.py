@@ -1011,6 +1011,7 @@ else:
             "BertSelfOutput",
             "BertAttention",
             "BertIntermediate",
+            "BertOutput",
             "BertForMaskedLM",
             "BertForMultipleChoice",
             "BertForNextSentencePrediction",
@@ -1032,6 +1033,7 @@ else:
             "BfBertSelfOutput",
             "BfBertAttention",
             "BfBertIntermediate",
+            "BfBertOutput",
         ]
     )
 
