@@ -1007,6 +1007,7 @@ else:
         [
             "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
             "BertEmbeddings",
+            "BertSelfAttention",
             "BertForMaskedLM",
             "BertForMultipleChoice",
             "BertForNextSentencePrediction",
@@ -1021,7 +1022,12 @@ else:
             "load_tf_weights_in_bert",
         ]
     )
-    _import_structure["models.bert"].extend(["BfBertEmbeddings",])
+    _import_structure["models.bert"].extend(
+        [
+            "BfBertEmbeddings",
+            "BfBertSelfAttention",
+        ]
+    )
 
     _import_structure["models.bert_generation"].extend(
         [

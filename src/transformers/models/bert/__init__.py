@@ -51,7 +51,8 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["modeling_bf_bert"] = [
         # "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
-        "BfBertEmbeddings"
+        "BfBertEmbeddings",
+        "BfBertSelfAttention",
         # "BertForMaskedLM",
         # "BertForMultipleChoice",
         # "BertForNextSentencePrediction",
@@ -74,6 +75,7 @@ except OptionalDependencyNotAvailable:
 else:
     _import_structure["modeling_bert"] = [
         "BertEmbeddings",
+        "BertSelfAttention",
         "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
         "BertForMaskedLM",
         "BertForMultipleChoice",
