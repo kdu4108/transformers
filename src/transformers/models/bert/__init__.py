@@ -53,6 +53,7 @@ else:
         # "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
         "BfBertEmbeddings",
         "BfBertSelfAttention",
+        "BfBertSelfOutput",
         # "BertForMaskedLM",
         # "BertForMultipleChoice",
         # "BertForNextSentencePrediction",
@@ -76,6 +77,7 @@ else:
     _import_structure["modeling_bert"] = [
         "BertEmbeddings",
         "BertSelfAttention",
+        "BertSelfOutput",
         "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
         "BertForMaskedLM",
         "BertForMultipleChoice",

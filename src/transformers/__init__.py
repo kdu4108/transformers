@@ -1008,6 +1008,7 @@ else:
             "BERT_PRETRAINED_MODEL_ARCHIVE_LIST",
             "BertEmbeddings",
             "BertSelfAttention",
+            "BertSelfOutput",
             "BertForMaskedLM",
             "BertForMultipleChoice",
             "BertForNextSentencePrediction",
@@ -1026,6 +1027,7 @@ else:
         [
             "BfBertEmbeddings",
             "BfBertSelfAttention",
+            "BfBertSelfOutput",
         ]
     )
 
