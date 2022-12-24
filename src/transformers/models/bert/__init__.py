@@ -57,6 +57,7 @@ else:
         "BfBertAttention",
         "BfBertIntermediate",
         "BfBertOutput",
+        "BfBertLayer",
         # "BertForMaskedLM",
         # "BertForMultipleChoice",
         # "BertForNextSentencePrediction",

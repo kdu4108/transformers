@@ -16,45 +16,48 @@ from typing import Callable, List, Optional, Set, Tuple, Union
 import brunoflow as bf
 from brunoflow.net import Dropout, Embedding, LayerNorm, Linear, Network
 
-# import torch
+import torch
 from packaging import version
 
-# from torch import _softmax_backward_data, nn
+from torch import _softmax_backward_data, nn
 
 from .utils import logging
 
 
-# ALL_LAYERNORM_LAYERS = [nn.LayerNorm]
+ALL_LAYERNORM_LAYERS = [nn.LayerNorm]
 
-# logger = logging.get_logger(__name__)
+logger = logging.get_logger(__name__)
 
-# parsed_torch_version_base = version.parse(version.parse(torch.__version__).base_version)
+parsed_torch_version_base = version.parse(version.parse(torch.__version__).base_version)
 
-# is_torch_less_than_1_8 = parsed_torch_version_base < version.parse("1.8.0")
-# is_torch_greater_or_equal_than_1_10 = parsed_torch_version_base >= version.parse("1.10")
-# is_torch_less_than_1_11 = parsed_torch_version_base < version.parse("1.11")
-
-
-# def torch_int_div(tensor1, tensor2):
-#     """
-#     A function that performs integer division across different versions of PyTorch.
-#     """
-#     if is_torch_less_than_1_8:
-#         return tensor1 // tensor2
-#     else:
-#         return torch.div(tensor1, tensor2, rounding_mode="floor")
+is_torch_less_than_1_8 = parsed_torch_version_base < version.parse("1.8.0")
+is_torch_greater_or_equal_than_1_10 = parsed_torch_version_base >= version.parse("1.10")
+is_torch_less_than_1_11 = parsed_torch_version_base < version.parse("1.11")
 
 
-# def softmax_backward_data(parent, grad_output, output, dim, self):
-#     """
-#     A function that calls the internal `_softmax_backward_data` PyTorch method and that adjusts the arguments according
-#     to the torch version detected.
-#     """
+def torch_int_div(tensor1, tensor2):
+    """
+    A function that performs integer division across different versions of PyTorch.
+    """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
 
-#     if is_torch_less_than_1_11:
-#         return _softmax_backward_data(grad_output, output, parent.dim, self)
-#     else:
-#         return _softmax_backward_data(grad_output, output, parent.dim, self.dtype)
+    if is_torch_less_than_1_8:
+        return tensor1 // tensor2
+    else:
+        return torch.div(tensor1, tensor2, rounding_mode="floor")
+
+
+def softmax_backward_data(parent, grad_output, output, dim, self):
+    """
+    A function that calls the internal `_softmax_backward_data` PyTorch method and that adjusts the arguments according
+    to the torch version detected.
+    """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
+
+    if is_torch_less_than_1_11:
+        return _softmax_backward_data(grad_output, output, parent.dim, self)
+    else:
+        return _softmax_backward_data(grad_output, output, parent.dim, self.dtype)
 
 
 def prune_linear_layer(layer: Linear, index: bf.Node, dim: int = 0) -> Linear:
@@ -71,6 +74,7 @@ def prune_linear_layer(layer: Linear, index: bf.Node, dim: int = 0) -> Linear:
     Returns:
         `torch.nn.Linear`: The pruned layer as a new layer with `requires_grad=True`.
     """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
     W = layer.weight.index_select(dim, index).clone().detach()
     if layer.bias is not None:
         if dim == 1:
@@ -131,6 +135,8 @@ def prune_conv1d_layer(layer: Conv1D, index: torch.LongTensor, dim: int = 1) -> 
     Returns:
         [`~pytorch_utils.Conv1D`]: The pruned layer as a new layer with `requires_grad=True`.
     """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
+
     index = index.to(layer.weight.device)
     W = layer.weight.index_select(dim, index).clone().detach()
     if dim == 0:
@@ -165,6 +171,8 @@ def prune_layer(
     Returns:
         `torch.nn.Linear` or [`~pytorch_utils.Conv1D`]: The pruned layer as a new layer with `requires_grad=True`.
     """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
+
     if isinstance(layer, nn.Linear):
         return prune_linear_layer(layer, index, dim=0 if dim is None else dim)
     elif isinstance(layer, Conv1D):
@@ -263,6 +271,8 @@ def find_pruneable_heads_and_indices(
     Returns:
         `Tuple[Set[int], torch.LongTensor]`: A tuple with the remaining heads and their corresponding indices.
     """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
+
     mask = torch.ones(n_heads, head_size)
     heads = set(heads) - already_pruned_heads  # Convert to set and remove already pruned heads
     for head in heads:
@@ -282,6 +292,8 @@ def meshgrid(
 
     Reference: https://pytorch.org/docs/1.13/generated/torch.meshgrid.html
     """
+    raise NotImplementedError("This hasn't been bf-ified yet!")
+
     if is_torch_greater_or_equal_than_1_10:
         return torch.meshgrid(*tensors, indexing=indexing)
     else:

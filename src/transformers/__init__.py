@@ -1012,6 +1012,7 @@ else:
             "BertAttention",
             "BertIntermediate",
             "BertOutput",
+            "BertLayer",
             "BertForMaskedLM",
             "BertForMultipleChoice",
             "BertForNextSentencePrediction",
@@ -1019,7 +1020,6 @@ else:
             "BertForQuestionAnswering",
             "BertForSequenceClassification",
             "BertForTokenClassification",
-            "BertLayer",
             "BertLMHeadModel",
             "BertModel",
             "BertPreTrainedModel",
@@ -1034,6 +1034,7 @@ else:
             "BfBertAttention",
             "BfBertIntermediate",
             "BfBertOutput",
+            "BfBertLayer",
         ]
     )
 
