@@ -26,13 +26,14 @@ def check_bf_param_weights_match_torch(bf_network: Network, torch_module: Module
         ), f"Value of param {name} for bf and torch are not equal."
 
 
-def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, atol=1e-8):
+def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, print_stats=False, atol=1e-8):
     """Used to verify the output of a bf model and torch module are close."""
     bf_allclose_torch = check_node_allclose_tensor(out_bf, out_torch, atol=atol)
     print(f"Output of bf and torch are within {atol}? {bf_allclose_torch}")
-    diff = jnp.abs(out_bf.val - out_torch.detach().numpy())
-    diff_df = pd.DataFrame(diff)
-    print(f"\tStats on diff in outputs between bf and torch: {diff_df.describe()}")
+    if print_stats:
+        diff = jnp.abs(out_bf.val - out_torch.detach().numpy())
+        diff_df = pd.DataFrame(diff)
+        print(f"\tStats on diff in outputs between bf and torch: {diff_df.describe()}")
 
     assert bf_allclose_torch
 
@@ -75,16 +76,18 @@ def check_dataclass_keys_match(out_bf_model_output, out_torch_model_output):
     ), f"Keys of f{out_bf_model_output} and f{out_torch_model_output} don't match.\nBF keys: {set(fields(out_bf_model_output))}.\nTorch keys: {set(fields(out_torch_model_output))}"
 
 
-def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", atol=1e-8):
+def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", print_stats=False, atol=1e-8):
     if isinstance(out_torch, Tensor) != isinstance(out_bf, Node):
         raise ValueError(
             f"BF ModelOutput does not equal Torch ModelOutput - type(out_torch) is {type(out_torch)} while type(out_bf) is {type(out_bf)}."
         )
 
     if isinstance(out_torch, Tensor) and isinstance(out_bf, Node):
-        assert check_node_allclose_tensor(
-            out_bf, out_torch, atol=atol
-        ), f"Output value of {fieldname} for bf and torch are not within {atol}."
+        try:
+            check_bf_model_outputs_match_torch_outputs(out_bf, out_torch, print_stats=print_stats, atol=atol)
+        except AssertionError:
+            raise AssertionError(f"Output value of {fieldname} for bf and torch are not within {atol}.")
+
     else:
         if is_dataclass(out_torch):
             for field in fields(out_torch):
