@@ -30,6 +30,10 @@ def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, 
     """Used to verify the output of a bf model and torch module are close."""
     bf_allclose_torch = check_node_allclose_tensor(out_bf, out_torch, atol=atol)
     print(f"Output of bf and torch are within {atol}? {bf_allclose_torch}")
+    diff = jnp.abs(out_bf.val - out_torch.detach().numpy())
+    diff_df = pd.DataFrame(diff)
+    print(f"\tStats on diff in outputs between bf and torch: {diff_df.describe()}")
+
     assert bf_allclose_torch
 
 
@@ -43,6 +47,7 @@ def check_bf_param_grads_allclose_torch(
         torch_params.keys()
     ), f"BF and torch keys do not match: BF contains following extra keys {set(bf_params.keys()).difference(set(torch_params.keys()))} and is missing keys {set(torch_params.keys()).difference(set(bf_params.keys()))}"
 
+    not_allclose_params = []
     for name in bf_params.keys():
         is_allclose = jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol)
         if print_output:
@@ -50,10 +55,12 @@ def check_bf_param_grads_allclose_torch(
         if not is_allclose:
             diff = jnp.abs(bf_params[name].grad - torch_params[name].grad.numpy())
             diff_df = pd.DataFrame(diff)
+            not_allclose_params.append(name)
 
             print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
-        if use_assert:
-            assert is_allclose, f"Grad of param {name} for bf and torch are not within {atol}."
+
+    if use_assert:
+        assert is_allclose, f"Grad of params {not_allclose_params} for bf and torch are not within {atol}."
 
 
 def check_equivalent_class(out_bf_model_output, out_torch_model_output):
