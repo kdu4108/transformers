@@ -1,5 +1,6 @@
 from dataclasses import dataclass, fields, is_dataclass
 from jax import numpy as jnp
+import pandas as pd
 from torch import Tensor
 from torch.nn import Module
 from brunoflow.ad import Node
@@ -32,7 +33,9 @@ def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, 
     assert bf_allclose_torch
 
 
-def check_bf_param_grads_allclose_torch(bf_network: Network, torch_module: Module, atol=1e-6, print_output=False):
+def check_bf_param_grads_allclose_torch(
+    bf_network: Network, torch_module: Module, atol=1e-6, print_output=False, use_assert=True
+):
     """Used to verify that grad after backward passes for bf and torch are close for all params in the network."""
     bf_params = {name: param for name, param in bf_network.named_parameters()}
     torch_params = {name: param for name, param in torch_module.named_parameters()}
@@ -41,13 +44,16 @@ def check_bf_param_grads_allclose_torch(bf_network: Network, torch_module: Modul
     ), f"BF and torch keys do not match: BF contains following extra keys {set(bf_params.keys()).difference(set(torch_params.keys()))} and is missing keys {set(torch_params.keys()).difference(set(bf_params.keys()))}"
 
     for name in bf_params.keys():
+        is_allclose = jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol)
         if print_output:
-            print(
-                f"Grad of param {name} for bf and torch are within {atol}? {jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol)}"
-            )
-        assert jnp.allclose(
-            bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol
-        ), f"Grad of param {name} for bf and torch are not within {atol}."
+            print(f"Grad of param {name} for bf and torch are within {atol}? {is_allclose}")
+        if not is_allclose:
+            diff = jnp.abs(bf_params[name].grad - torch_params[name].grad.numpy())
+            diff_df = pd.DataFrame(diff)
+
+            print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
+        if use_assert:
+            assert is_allclose, f"Grad of param {name} for bf and torch are not within {atol}."
 
 
 def check_equivalent_class(out_bf_model_output, out_torch_model_output):
@@ -82,7 +88,8 @@ def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", atol=1e
             for i in range(len(out_torch)):
                 check_dataclass_values_allclose(out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", atol=atol)
         else:
-            print(f"Comparing equality of torch object {type(out_torch)} with bf object {type(out_bf)}.")
+            if out_torch is not None:
+                print(f"Comparing equality of torch object {type(out_torch)} with bf object {type(out_bf)}.")
             assert out_torch == out_bf
 
 
