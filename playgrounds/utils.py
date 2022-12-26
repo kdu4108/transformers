@@ -84,6 +84,8 @@ def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", print_s
 
     if isinstance(out_torch, Tensor) and isinstance(out_bf, Node):
         try:
+            if print_stats:
+                print(f"Checking diff between BF and torch for {fieldname}:")
             check_bf_model_outputs_match_torch_outputs(out_bf, out_torch, print_stats=print_stats, atol=atol)
         except AssertionError:
             raise AssertionError(f"Output value of {fieldname} for bf and torch are not within {atol}.")
@@ -103,7 +105,11 @@ def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", print_s
             assert out_torch == out_bf
 
 
-def check_model_outputs_allclose(out_bf_model_output: ModelOutput, out_torch_model_output: ModelOutput, atol=1e-8):
+def check_model_outputs_allclose(
+    out_bf_model_output: ModelOutput, out_torch_model_output: ModelOutput, print_stats=False, atol=1e-8
+):
     check_dataclass_keys_match(out_bf_model_output, out_torch_model_output)
     check_equivalent_class(out_bf_model_output, out_torch_model_output)
-    check_dataclass_values_allclose(out_bf_model_output, out_torch_model_output, fieldname="root", atol=atol)
+    check_dataclass_values_allclose(
+        out_bf_model_output, out_torch_model_output, fieldname="root", print_stats=False, atol=atol
+    )
