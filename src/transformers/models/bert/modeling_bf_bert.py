@@ -16,7 +16,7 @@
 """Brunoflow BERT model."""
 
 import brunoflow as bf
-from brunoflow.net import Dropout, Embedding, LayerNorm, Linear, Network
+from brunoflow.net import Dropout, Embedding, LayerNorm, Linear, ModuleList, Network, Tanh
 from jax import numpy as jnp
 import math
 import os
@@ -25,10 +25,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 from ...activations_bf import ACT2FN
-from ...modeling_outputs import (
-    BaseModelOutputWithPastAndCrossAttentions,
-    BaseModelOutputWithPoolingAndCrossAttentions,
-    MaskedLMOutput,
+from ...modeling_bf_outputs import (
+    BfBaseModelOutputWithPastAndCrossAttentions,
+    BfBaseModelOutputWithPoolingAndCrossAttentions,
+    BfMaskedLMOutput,
 )
 from ...modeling_utils import PreTrainedModel
 from ...bf_utils import apply_chunking_to_forward, find_pruneable_heads_and_indices, prune_linear_layer
@@ -534,116 +534,118 @@ class BfBertLayer(Network):
         return layer_output
 
 
-# class BertEncoder(nn.Module):
-#     def __init__(self, config):
-#         super().__init__()
-#         self.config = config
-#         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
-#         self.gradient_checkpointing = False
+class BfBertEncoder(Network):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.layer = ModuleList([BfBertLayer(config) for _ in range(config.num_hidden_layers)])
+        self.gradient_checkpointing = False
 
-#     def forward(
-#         self,
-#         hidden_states: torch.Tensor,
-#         attention_mask: Optional[torch.FloatTensor] = None,
-#         head_mask: Optional[torch.FloatTensor] = None,
-#         encoder_hidden_states: Optional[torch.FloatTensor] = None,
-#         encoder_attention_mask: Optional[torch.FloatTensor] = None,
-#         past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-#         use_cache: Optional[bool] = None,
-#         output_attentions: Optional[bool] = False,
-#         output_hidden_states: Optional[bool] = False,
-#         return_dict: Optional[bool] = True,
-#     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPastAndCrossAttentions]:
-#         all_hidden_states = () if output_hidden_states else None
-#         all_self_attentions = () if output_attentions else None
-#         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
+    def forward(
+        self,
+        hidden_states: bf.Node,
+        attention_mask: Optional[bf.Node] = None,
+        head_mask: Optional[bf.Node] = None,
+        encoder_hidden_states: Optional[bf.Node] = None,
+        encoder_attention_mask: Optional[bf.Node] = None,
+        past_key_values: Optional[Tuple[Tuple[bf.Node]]] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = False,
+        output_hidden_states: Optional[bool] = False,
+        return_dict: Optional[bool] = True,
+    ) -> Union[Tuple[bf.Node], BfBaseModelOutputWithPastAndCrossAttentions]:
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attentions = () if output_attentions else None
+        all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
-#         next_decoder_cache = () if use_cache else None
-#         for i, layer_module in enumerate(self.layer):
-#             if output_hidden_states:
-#                 all_hidden_states = all_hidden_states + (hidden_states,)
+        next_decoder_cache = () if use_cache else None
+        for i, layer_module in enumerate(self.layer):
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
-#             layer_head_mask = head_mask[i] if head_mask is not None else None
-#             past_key_value = past_key_values[i] if past_key_values is not None else None
+            layer_head_mask = head_mask[i] if head_mask is not None else None
+            past_key_value = past_key_values[i] if past_key_values is not None else None
 
-#             if self.gradient_checkpointing and self.training:
+            if self.gradient_checkpointing and self.training:
+                raise NotImplementedError("Gradient checkpointing is not implemented with brunoflow.")
+                # if use_cache:
+                #     logger.warning(
+                #         "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                #     )
+                #     use_cache = False
 
-#                 if use_cache:
-#                     logger.warning(
-#                         "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-#                     )
-#                     use_cache = False
+                # def create_custom_forward(module):
+                #     def custom_forward(*inputs):
+                #         return module(*inputs, past_key_value, output_attentions)
 
-#                 def create_custom_forward(module):
-#                     def custom_forward(*inputs):
-#                         return module(*inputs, past_key_value, output_attentions)
+                #     return custom_forward
 
-#                     return custom_forward
+                # layer_outputs = torch.utils.checkpoint.checkpoint(
+                #     create_custom_forward(layer_module),
+                #     hidden_states,
+                #     attention_mask,
+                #     layer_head_mask,
+                #     encoder_hidden_states,
+                #     encoder_attention_mask,
+                # )
 
-#                 layer_outputs = torch.utils.checkpoint.checkpoint(
-#                     create_custom_forward(layer_module),
-#                     hidden_states,
-#                     attention_mask,
-#                     layer_head_mask,
-#                     encoder_hidden_states,
-#                     encoder_attention_mask,
-#                 )
-#             else:
-#                 layer_outputs = layer_module(
-#                     hidden_states,
-#                     attention_mask,
-#                     layer_head_mask,
-#                     encoder_hidden_states,
-#                     encoder_attention_mask,
-#                     past_key_value,
-#                     output_attentions,
-#                 )
+            else:
+                layer_outputs = layer_module(
+                    hidden_states,
+                    attention_mask,
+                    layer_head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    past_key_value,
+                    output_attentions,
+                )
 
-#             hidden_states = layer_outputs[0]
-#             if use_cache:
-#                 next_decoder_cache += (layer_outputs[-1],)
-#             if output_attentions:
-#                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
-#                 if self.config.add_cross_attention:
-#                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
+            hidden_states = layer_outputs[0]
+            if use_cache:
+                next_decoder_cache += (layer_outputs[-1],)
+            if output_attentions:
+                all_self_attentions = all_self_attentions + (layer_outputs[1],)
+                if self.config.add_cross_attention:
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
 
-#         if output_hidden_states:
-#             all_hidden_states = all_hidden_states + (hidden_states,)
+        if output_hidden_states:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
-#         if not return_dict:
-#             return tuple(
-#                 v
-#                 for v in [
-#                     hidden_states,
-#                     next_decoder_cache,
-#                     all_hidden_states,
-#                     all_self_attentions,
-#                     all_cross_attentions,
-#                 ]
-#                 if v is not None
-#             )
-#         return BaseModelOutputWithPastAndCrossAttentions(
-#             last_hidden_state=hidden_states,
-#             past_key_values=next_decoder_cache,
-#             hidden_states=all_hidden_states,
-#             attentions=all_self_attentions,
-#             cross_attentions=all_cross_attentions,
-#         )
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_decoder_cache,
+                    all_hidden_states,
+                    all_self_attentions,
+                    all_cross_attentions,
+                ]
+                if v is not None
+            )
+        return BfBaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attentions,
+            cross_attentions=all_cross_attentions,
+        )
 
 
-# class BertPooler(nn.Module):
-#     def __init__(self, config):
-#         super().__init__()
-#         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-#         self.activation = nn.Tanh()
+class BertPooler(Network):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = Linear(config.hidden_size, config.hidden_size)
+        self.activation = Tanh()
+        print("WARNING: TODO(KD) - when this is used, write some tests for this!")
 
-#     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-#         # We "pool" the model by simply taking the hidden state corresponding
-#         # to the first token.
-#         first_token_tensor = hidden_states[:, 0]
-#         pooled_output = self.dense(first_token_tensor)
-#         pooled_output = self.activation(pooled_output)
-#         return pooled_output
+    def forward(self, hidden_states: bf.Node) -> bf.Node:
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
 
 
 # class BertPredictionHeadTransform(nn.Module):

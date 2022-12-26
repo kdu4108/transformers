@@ -890,7 +890,12 @@ else:
         ]
     )
     _import_structure["generation_utils"] = []
-    _import_structure["modeling_outputs"] = []
+    _import_structure["modeling_outputs"] = [
+        "BaseModelOutputWithPastAndCrossAttentions",
+    ]
+    _import_structure["modeling_bf_outputs"] = [
+        "BfBaseModelOutputWithPastAndCrossAttentions",
+    ]
     _import_structure["modeling_utils"] = ["PreTrainedModel"]
 
     # PyTorch models structure
@@ -1013,6 +1018,7 @@ else:
             "BertIntermediate",
             "BertOutput",
             "BertLayer",
+            "BertEncoder",
             "BertForMaskedLM",
             "BertForMultipleChoice",
             "BertForNextSentencePrediction",
@@ -1035,6 +1041,7 @@ else:
             "BfBertIntermediate",
             "BfBertOutput",
             "BfBertLayer",
+            "BfBertEncoder",
         ]
     )
 
