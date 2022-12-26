@@ -32,7 +32,7 @@ def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, 
     print(f"Output of bf and torch are within {atol}? {bf_allclose_torch}")
     if print_stats:
         diff = jnp.abs(out_bf.val - out_torch.detach().numpy())
-        diff_df = pd.DataFrame(diff)
+        diff_df = pd.DataFrame(diff.ravel())
         print(f"\tStats on diff in outputs between bf and torch: {diff_df.describe()}")
 
     assert bf_allclose_torch
@@ -94,11 +94,11 @@ def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", print_s
         if is_dataclass(out_torch):
             for field in fields(out_torch):
                 check_dataclass_values_allclose(
-                    getattr(out_bf, field.name), getattr(out_torch, field.name), fieldname=field.name, atol=atol
+                    getattr(out_bf, field.name), getattr(out_torch, field.name), fieldname=field.name, print_stats=print_stats, atol=atol
                 )
         elif isinstance(out_torch, (list, tuple)):
             for i in range(len(out_torch)):
-                check_dataclass_values_allclose(out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", atol=atol)
+                check_dataclass_values_allclose(out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", print_stats=print_stats, atol=atol)
         else:
             if out_torch is not None:
                 print(f"Comparing equality of torch object {type(out_torch)} with bf object {type(out_bf)}.")
@@ -111,5 +111,5 @@ def check_model_outputs_allclose(
     check_dataclass_keys_match(out_bf_model_output, out_torch_model_output)
     check_equivalent_class(out_bf_model_output, out_torch_model_output)
     check_dataclass_values_allclose(
-        out_bf_model_output, out_torch_model_output, fieldname="root", print_stats=False, atol=atol
+        out_bf_model_output, out_torch_model_output, fieldname="root", print_stats=print_stats, atol=atol
     )
