@@ -50,40 +50,43 @@ def check_bf_param_grads_allclose_torch(bf_network: Network, torch_module: Modul
         ), f"Grad of param {name} for bf and torch are not within {atol}."
 
 
-def check_model_outputs_allclose(out_bf_model_output: ModelOutput, out_torch_model_output: ModelOutput, atol=1e-8):
-    def _check_equivalent_class(out_bf_model_output, out_torch_model_output):
-        bf_name = type(out_bf_model_output).__name__
-        torch_name = type(out_torch_model_output).__name__
-        assert bf_name == "Bf" + torch_name  # all BF versions of torch HF classes are prefixed with "Bf".
+def check_equivalent_class(out_bf_model_output, out_torch_model_output):
+    bf_name = type(out_bf_model_output).__name__
+    torch_name = type(out_torch_model_output).__name__
+    assert bf_name == "Bf" + torch_name  # all BF versions of torch HF classes are prefixed with "Bf".
 
-    def _check_dataclass_keys_match(out_bf_model_output, out_torch_model_output):
-        assert set([f.name for f in fields(out_bf_model_output)]) == set(
-            [f.name for f in fields(out_torch_model_output)]
-        ), f"Keys of f{out_bf_model_output} and f{out_torch_model_output} don't match.\nBF keys: {set(fields(out_bf_model_output))}.\nTorch keys: {set(fields(out_torch_model_output))}"
 
-    def _check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", atol=1e-8):
-        if isinstance(out_torch, Tensor) != isinstance(out_bf, Node):
-            raise ValueError(
-                f"BF ModelOutput does not equal Torch ModelOutput - type(out_torch) is {type(out_torch)} while type(out_bf) is {type(out_bf)}."
-            )
+def check_dataclass_keys_match(out_bf_model_output, out_torch_model_output):
+    assert set([f.name for f in fields(out_bf_model_output)]) == set(
+        [f.name for f in fields(out_torch_model_output)]
+    ), f"Keys of f{out_bf_model_output} and f{out_torch_model_output} don't match.\nBF keys: {set(fields(out_bf_model_output))}.\nTorch keys: {set(fields(out_torch_model_output))}"
 
-        if isinstance(out_torch, Tensor) and isinstance(out_bf, Node):
-            assert check_node_allclose_tensor(
-                out_bf, out_torch, atol=atol
-            ), f"Output value of {fieldname} for bf and torch are not within {atol}."
+
+def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", atol=1e-8):
+    if isinstance(out_torch, Tensor) != isinstance(out_bf, Node):
+        raise ValueError(
+            f"BF ModelOutput does not equal Torch ModelOutput - type(out_torch) is {type(out_torch)} while type(out_bf) is {type(out_bf)}."
+        )
+
+    if isinstance(out_torch, Tensor) and isinstance(out_bf, Node):
+        assert check_node_allclose_tensor(
+            out_bf, out_torch, atol=atol
+        ), f"Output value of {fieldname} for bf and torch are not within {atol}."
+    else:
+        if is_dataclass(out_torch):
+            for field in fields(out_torch):
+                check_dataclass_values_allclose(
+                    getattr(out_bf, field.name), getattr(out_torch, field.name), fieldname=field.name, atol=atol
+                )
+        elif isinstance(out_torch, (list, tuple)):
+            for i in range(len(out_torch)):
+                check_dataclass_values_allclose(out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", atol=atol)
         else:
-            if is_dataclass(out_torch):
-                for field in fields(out_torch):
-                    _check_dataclass_values_allclose(
-                        getattr(out_bf, field.name), getattr(out_torch, field.name), fieldname=field.name, atol=atol
-                    )
-            elif isinstance(out_torch, (list, tuple)):
-                for i in range(len(out_torch)):
-                    _check_dataclass_values_allclose(out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", atol=atol)
-            else:
-                print(f"Comparing equality of torch object {type(out_torch)} with bf object {type(out_bf)}.")
-                assert out_torch == out_bf
+            print(f"Comparing equality of torch object {type(out_torch)} with bf object {type(out_bf)}.")
+            assert out_torch == out_bf
 
-    _check_dataclass_keys_match(out_bf_model_output, out_torch_model_output)
-    _check_equivalent_class(out_bf_model_output, out_torch_model_output)
-    _check_dataclass_values_allclose(out_bf_model_output, out_torch_model_output, fieldname="root", atol=atol)
+
+def check_model_outputs_allclose(out_bf_model_output: ModelOutput, out_torch_model_output: ModelOutput, atol=1e-8):
+    check_dataclass_keys_match(out_bf_model_output, out_torch_model_output)
+    check_equivalent_class(out_bf_model_output, out_torch_model_output)
+    check_dataclass_values_allclose(out_bf_model_output, out_torch_model_output, fieldname="root", atol=atol)
