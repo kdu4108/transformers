@@ -1042,6 +1042,13 @@ else:
             "BfBertOutput",
             "BfBertLayer",
             "BfBertEncoder",
+            "BfBertPooler",
+            "BfBertPredictionHeadTransform",
+            "BfBertLMPredictionHead",
+            "BfBertOnlyMLMHead",
+            "BfBertPreTrainedModel",
+            "BfBertModel",
+            "BfBertForMaskedLM",
         ]
     )
 

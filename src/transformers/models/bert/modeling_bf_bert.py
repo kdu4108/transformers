@@ -30,7 +30,7 @@ from ...modeling_bf_outputs import (
     BfBaseModelOutputWithPoolingAndCrossAttentions,
     BfMaskedLMOutput,
 )
-from ...modeling_utils import PreTrainedModel
+from ...modeling_bf_utils import BfPreTrainedModel
 from ...bf_utils import apply_chunking_to_forward, find_pruneable_heads_and_indices, prune_linear_layer
 from ...utils import (
     ModelOutput,
@@ -632,7 +632,7 @@ class BfBertEncoder(Network):
         )
 
 
-class BertPooler(Network):
+class BfBertPooler(Network):
     def __init__(self, config):
         super().__init__()
         self.dense = Linear(config.hidden_size, config.hidden_size)
@@ -695,7 +695,7 @@ class BfBertOnlyMLMHead(Network):
         return prediction_scores
 
 
-class BfBertPreTrainedModel(PreTrainedModel):
+class BfBertPreTrainedModel(BfPreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -709,6 +709,7 @@ class BfBertPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights"""
+        raise NotImplementedError("This isn't implemented yet because we don't need it!")
         if isinstance(module, Linear):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
@@ -818,7 +819,7 @@ class BfBertModel(BfBertPreTrainedModel):
         self.embeddings = BfBertEmbeddings(config)
         self.encoder = BfBertEncoder(config)
 
-        self.pooler = BertPooler(config) if add_pooling_layer else None
+        self.pooler = BfBertPooler(config) if add_pooling_layer else None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -835,7 +836,9 @@ class BfBertModel(BfBertPreTrainedModel):
         class PreTrainedModel
         """
         for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
+            self.encoder.layer[layer].attention.prune_heads(
+                heads
+            )  # TODO(KD): this is not yet implemented for BertAttention, so this will fail
 
     @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(

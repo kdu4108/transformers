@@ -50,18 +50,24 @@ def check_bf_param_grads_allclose_torch(
 
     not_allclose_params = []
     for name in bf_params.keys():
-        is_allclose = jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol)
-        if print_output:
-            print(f"Grad of param {name} for bf and torch are within {atol}? {is_allclose}")
-        if not is_allclose:
-            diff = jnp.abs(bf_params[name].grad - torch_params[name].grad.numpy())
-            diff_df = pd.DataFrame(diff)
-            not_allclose_params.append(name)
+        if torch_params[name].grad is None:
+            bf_grad_is_zero = jnp.array_equal(bf_params[name].grad, jnp.zeros_like(bf_params[name].grad))
+            print(f"No grad for param {name} for torch. BF grad is zero? {bf_grad_is_zero}")
+            if not bf_grad_is_zero:
+                not_allclose_params.append(name)
+        else:
+            is_allclose = jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol)
+            if print_output:
+                print(f"Grad of param {name} for bf and torch are within {atol}? {is_allclose}")
+            if not is_allclose:
+                diff = jnp.abs(bf_params[name].grad - torch_params[name].grad.numpy())
+                diff_df = pd.DataFrame(diff)
+                not_allclose_params.append(name)
 
-            print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
+                print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
 
     if use_assert:
-        assert is_allclose, f"Grad of params {not_allclose_params} for bf and torch are not within {atol}."
+        assert not not_allclose_params, f"Grad of params {not_allclose_params} for bf and torch are not within {atol}."
 
 
 def check_equivalent_class(out_bf_model_output, out_torch_model_output):

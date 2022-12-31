@@ -13,9 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import brunoflow as bf
+from brunoflow.net import Network
 import collections
 import gc
 import inspect
+from jax import numpy as jnp
 import json
 import os
 import re
@@ -178,46 +181,21 @@ def get_first_parameter_dtype(parameter: Union[nn.Module, GenerationMixin, "Modu
         return first_tuple[1].dtype
 
 
-def get_parameter_dtype(parameter: Union[nn.Module, GenerationMixin, "ModuleUtilsMixin"]):
+def get_parameter_dtype(parameter: Union[Network, GenerationMixin, "ModuleUtilsMixin"]):
     """
-    Returns the first found floating dtype in parameters if there is one, otherwise returns the last dtype it found.
+    Returns the first found float dtype in parameters.
     """
-    last_dtype = None
+    if isinstance(parameter, GenerationMixin):
+        raise NotImplementedError("TODO(KD): Generative-BERT things have not been implemented. Be wary here!")
     for t in parameter.parameters():
-        last_dtype = t.dtype
-        if t.is_floating_point():
-            # Adding fix for https://github.com/pytorch/xla/issues/4152
-            # Fixes issue where the model code passes a value that is out of range for XLA_USE_BF16=1
-            # and XLA_DOWNCAST_BF16=1 so the conversion would cast it to -inf
-            if is_torch_tpu_available():
-                if XLA_USE_BF16 in ENV_VARS_TRUE_VALUES:
-                    return torch.bfloat16
-                if XLA_DOWNCAST_BF16 in ENV_VARS_TRUE_VALUES:
-                    if t.dtype == torch.float:
-                        return torch.bfloat16
-                    if t.dtype == torch.double:
-                        return torch.float32
-            return t.dtype
+        if t.val.dtype is not None and (
+            t.val.dtype == jnp.float16 or t.val.dtype == jnp.float32 or t.val.dtype == jnp.float64
+        ):
+            return t.val.dtype
 
-    if last_dtype is not None:
-        # if no floating dtype was found return whatever the first dtype is
-        return last_dtype
-
-    else:
-        # For nn.DataParallel compatibility in PyTorch > 1.5
-        def find_tensor_attributes(module: nn.Module) -> List[Tuple[str, Tensor]]:
-            tuples = [(k, v) for k, v in module.__dict__.items() if torch.is_tensor(v)]
-            return tuples
-
-        gen = parameter._named_members(get_members_fn=find_tensor_attributes)
-        last_tuple = None
-        for tuple in gen:
-            last_tuple = tuple
-            if tuple[1].is_floating_point():
-                return tuple[1].dtype
-
-        # fallback to the last dtype
-        return last_tuple[1].dtype
+    raise ValueError(
+        "Expected a dtype in one of the parameters of the input network `parameter` but found None. Make sure `parameter` has parameters with a valid dtype."
+    )
 
 
 def get_state_dict_float_dtype(state_dict):
@@ -323,9 +301,7 @@ def shard_checkpoint(
     shards = {}
     for idx, shard in enumerate(sharded_state_dicts):
         shard_file = weights_name.replace(".bin", f"-{idx+1:05d}-of-{len(sharded_state_dicts):05d}.bin")
-        shard_file = shard_file.replace(
-            ".safetensors", f"-{idx + 1:05d}-of-{len(sharded_state_dicts):05d}.safetensors"
-        )
+        shard_file = shard_file.replace(".safetensors", f"-{idx + 1:05d}-of-{len(sharded_state_dicts):05d}.safetensors")
         shards[shard_file] = shard
         for key in shard.keys():
             weight_map[key] = shard_file
@@ -461,28 +437,13 @@ def _load_state_dict_into_model(model_to_load, state_dict, start_prefix):
 
     # PyTorch's `_load_from_state_dict` does not copy parameters in a module's descendants
     # so we need to apply the function recursively.
-    def load(module: nn.Module, state_dict, prefix=""):
+    def load(module: Network, state_dict, prefix=""):
         local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
         args = (state_dict, prefix, local_metadata, True, [], [], error_msgs)
         # Parameters of module and children will start with prefix. We can exit early if there are none in this
         # state_dict
         if len([key for key in state_dict if key.startswith(prefix)]) > 0:
-            if is_deepspeed_zero3_enabled():
-                import deepspeed
-
-                # In sharded models, each shard has only part of the full state_dict, so only gather
-                # parameters that are in the current state_dict.
-                named_parameters = dict(module.named_parameters(prefix=prefix[:-1], recurse=False))
-                params_to_gather = [named_parameters[k] for k in state_dict.keys() if k in named_parameters]
-                if len(params_to_gather) > 0:
-                    # because zero3 puts placeholders in model params, this context
-                    # manager gathers (unpartitions) the params of the current layer, then loads from
-                    # the state dict and then re-partitions them again
-                    with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
-                        if torch.distributed.get_rank() == 0:
-                            module._load_from_state_dict(*args)
-            else:
-                module._load_from_state_dict(*args)
+            module._load_from_state_dict(*args)
 
         for name, child in module._modules.items():
             if child is not None:
@@ -491,7 +452,7 @@ def _load_state_dict_into_model(model_to_load, state_dict, start_prefix):
     load(model_to_load, state_dict, prefix=start_prefix)
     # Delete `state_dict` so it could be collected by GC earlier. Note that `state_dict` is a copy of the argument, so
     # it's safe to delete it.
-    del state_dict
+    del state_dict  # TODO(KD) MAJOR: check if module has same weights/values as torch
 
     return error_msgs
 
@@ -658,74 +619,19 @@ def _load_state_dict_into_meta_model(
     return error_msgs, offload_index, state_dict_index
 
 
-class ModuleUtilsMixin:
+class BfModuleUtilsMixin:
     """
     A few utilities for `torch.nn.Modules`, to be used as a mixin.
     """
 
-    @staticmethod
-    def _hook_rss_memory_pre_forward(module, *args, **kwargs):
-        try:
-            import psutil
-        except ImportError:
-            raise ImportError("You need to install psutil (pip install psutil) to use memory tracing.")
-
-        process = psutil.Process(os.getpid())
-        mem = process.memory_info()
-        module.mem_rss_pre_forward = mem.rss
-        return None
-
-    @staticmethod
-    def _hook_rss_memory_post_forward(module, *args, **kwargs):
-        try:
-            import psutil
-        except ImportError:
-            raise ImportError("You need to install psutil (pip install psutil) to use memory tracing.")
-
-        process = psutil.Process(os.getpid())
-        mem = process.memory_info()
-        module.mem_rss_post_forward = mem.rss
-        mem_rss_diff = module.mem_rss_post_forward - module.mem_rss_pre_forward
-        module.mem_rss_diff = mem_rss_diff + (module.mem_rss_diff if hasattr(module, "mem_rss_diff") else 0)
-        return None
-
-    def add_memory_hooks(self):
-        """
-        Add a memory hook before and after each sub-module forward pass to record increase in memory consumption.
-
-        Increase in memory consumption is stored in a `mem_rss_diff` attribute for each module and can be reset to zero
-        with `model.reset_memory_hooks_state()`.
-        """
-        for module in self.modules():
-            module.register_forward_pre_hook(self._hook_rss_memory_pre_forward)
-            module.register_forward_hook(self._hook_rss_memory_post_forward)
-        self.reset_memory_hooks_state()
-
-    def reset_memory_hooks_state(self):
-        """
-        Reset the `mem_rss_diff` attribute of each module (see [`~modeling_utils.ModuleUtilsMixin.add_memory_hooks`]).
-        """
-        for module in self.modules():
-            module.mem_rss_diff = 0
-            module.mem_rss_post_forward = 0
-            module.mem_rss_pre_forward = 0
-
     @property
-    def device(self) -> torch.device:
-        """
-        `torch.device`: The device on which the module is (assuming that all the module parameters are on the same
-        device).
-        """
-        return get_parameter_device(self)
-
-    @property
-    def dtype(self) -> torch.dtype:
+    def dtype(self) -> jnp.dtype:
         """
         `torch.dtype`: The dtype of the module (assuming that all the module parameters have the same dtype).
         """
         return get_parameter_dtype(self)
 
-    def invert_attention_mask(self, encoder_attention_mask: Tensor) -> Tensor:
+    def invert_attention_mask(self, encoder_attention_mask: bf.Node) -> bf.Node:
         """
         Invert an attention mask (e.g., switches 0. and 1.).
 
@@ -735,51 +641,52 @@ class ModuleUtilsMixin:
         Returns:
             `torch.Tensor`: The inverted attention mask.
         """
-        if encoder_attention_mask.dim() == 3:
+        if len(encoder_attention_mask.shape) == 3:
             encoder_extended_attention_mask = encoder_attention_mask[:, None, :, :]
-        if encoder_attention_mask.dim() == 2:
+        if len(encoder_attention_mask.shape) == 2:
             encoder_extended_attention_mask = encoder_attention_mask[:, None, None, :]
         # T5 has a mask that can compare sequence ids, we can simulate this here with this transposition
         # Cf. https://github.com/tensorflow/mesh/blob/8d2465e9bc93129b913b5ccc6a59aa97abd96ec6/mesh_tensorflow
         # /transformer/transformer_layers.py#L270
         # encoder_extended_attention_mask = (encoder_extended_attention_mask ==
         # encoder_extended_attention_mask.transpose(-1, -2))
-        encoder_extended_attention_mask = encoder_extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
-        encoder_extended_attention_mask = (1.0 - encoder_extended_attention_mask) * torch.finfo(self.dtype).min
+        # encoder_extended_attention_mask = encoder_extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+        encoder_extended_attention_mask = (1.0 - encoder_extended_attention_mask) * jnp.finfo(self.dtype).min
 
         return encoder_extended_attention_mask
 
     @staticmethod
     def create_extended_attention_mask_for_decoder(input_shape, attention_mask, device=None):
-        if device is not None:
-            warnings.warn(
-                "The `device` argument is deprecated and will be removed in v5 of Transformers.", FutureWarning
-            )
-        else:
-            device = attention_mask.device
-        batch_size, seq_length = input_shape
-        seq_ids = torch.arange(seq_length, device=device)
-        causal_mask = seq_ids[None, None, :].repeat(batch_size, seq_length, 1) <= seq_ids[None, :, None]
-        # in case past_key_values are used we need to add a prefix ones mask to the causal mask
-        # causal and attention masks must have same type with pytorch version < 1.3
-        causal_mask = causal_mask.to(attention_mask.dtype)
+        raise NotImplementedError(
+            "create_extended_attention_mask_for_decoder isn't needed for MLM, so it's not bf-ified or tested yet. TODO(KD)"
+        )
+        # if device is not None:
+        #     warnings.warn(
+        #         "The `device` argument is deprecated and will be removed in v5 of Transformers.", FutureWarning
+        #     )
+        # else:
+        #     device = attention_mask.device
+        # batch_size, seq_length = input_shape
+        # seq_ids = torch.arange(seq_length, device=device)
+        # causal_mask = seq_ids[None, None, :].repeat(batch_size, seq_length, 1) <= seq_ids[None, :, None]
+        # # in case past_key_values are used we need to add a prefix ones mask to the causal mask
+        # # causal and attention masks must have same type with pytorch version < 1.3
+        # causal_mask = causal_mask.to(attention_mask.dtype)
 
-        if causal_mask.shape[1] < attention_mask.shape[1]:
-            prefix_seq_len = attention_mask.shape[1] - causal_mask.shape[1]
-            causal_mask = torch.cat(
-                [
-                    torch.ones((batch_size, seq_length, prefix_seq_len), device=device, dtype=causal_mask.dtype),
-                    causal_mask,
-                ],
-                axis=-1,
-            )
+        # if causal_mask.shape[1] < attention_mask.shape[1]:
+        #     prefix_seq_len = attention_mask.shape[1] - causal_mask.shape[1]
+        #     causal_mask = torch.cat(
+        #         [
+        #             torch.ones((batch_size, seq_length, prefix_seq_len), device=device, dtype=causal_mask.dtype),
+        #             causal_mask,
+        #         ],
+        #         axis=-1,
+        #     )
 
-        extended_attention_mask = causal_mask[:, None, :, :] * attention_mask[:, None, None, :]
-        return extended_attention_mask
+        # extended_attention_mask = causal_mask[:, None, :, :] * attention_mask[:, None, None, :]
+        # return extended_attention_mask
 
-    def get_extended_attention_mask(
-        self, attention_mask: Tensor, input_shape: Tuple[int], device: device = None, dtype: torch.float = None
-    ) -> Tensor:
+    def get_extended_attention_mask(self, attention_mask: bf.Node, input_shape: Tuple[int], dtype=None) -> bf.Node:
         """
         Makes broadcastable attention and causal masks so that future and masked tokens are ignored.
 
@@ -794,24 +701,22 @@ class ModuleUtilsMixin:
         """
         if dtype is None:
             dtype = self.dtype
+        else:
+            raise NotImplementedError(
+                "TODO(KD): casting nodes to different types is not yet implemented, so this doesn't work yet."
+            )
 
-        if not (attention_mask.dim() == 2 and self.config.is_decoder):
-            # show warning only if it won't be shown in `create_extended_attention_mask_for_decoder`
-            if device is not None:
-                warnings.warn(
-                    "The `device` argument is deprecated and will be removed in v5 of Transformers.", FutureWarning
-                )
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        if attention_mask.dim() == 3:
+        if len(attention_mask.shape) == 3:
             extended_attention_mask = attention_mask[:, None, :, :]
-        elif attention_mask.dim() == 2:
+        elif len(attention_mask.shape) == 2:
             # Provided a padding mask of dimensions [batch_size, seq_length]
             # - if the model is a decoder, apply a causal mask in addition to the padding mask
             # - if the model is an encoder, make the mask broadcastable to [batch_size, num_heads, seq_length, seq_length]
             if self.config.is_decoder:
                 extended_attention_mask = ModuleUtilsMixin.create_extended_attention_mask_for_decoder(
-                    input_shape, attention_mask, device
+                    input_shape, attention_mask
                 )
             else:
                 extended_attention_mask = attention_mask[:, None, None, :]
@@ -825,13 +730,13 @@ class ModuleUtilsMixin:
         # positions we want to attend and the dtype's smallest value for masked positions.
         # Since we are adding it to the raw scores before the softmax, this is
         # effectively the same as removing these entirely.
-        extended_attention_mask = extended_attention_mask.to(dtype=dtype)  # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * torch.finfo(dtype).min
+        # extended_attention_mask = extended_attention_mask.to(dtype=dtype)  # fp16 compatibility # TODO(KD): implement some sort of type converter for bf.Node?
+        extended_attention_mask = (1.0 - extended_attention_mask) * jnp.finfo(self.dtype).min
         return extended_attention_mask
 
     def get_head_mask(
-        self, head_mask: Optional[Tensor], num_hidden_layers: int, is_attention_chunked: bool = False
-    ) -> Tensor:
+        self, head_mask: Optional[bf.Node], num_hidden_layers: int, is_attention_chunked: bool = False
+    ) -> bf.Node:
         """
         Prepare the head mask if needed.
 
@@ -858,103 +763,95 @@ class ModuleUtilsMixin:
 
     def _convert_head_mask_to_5d(self, head_mask, num_hidden_layers):
         """-> [num_hidden_layers x batch x num_heads x seq_length x seq_length]"""
-        if head_mask.dim() == 1:
-            head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-            head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
-        elif head_mask.dim() == 2:
-            head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
-        assert head_mask.dim() == 5, f"head_mask.dim != 5, instead {head_mask.dim()}"
-        head_mask = head_mask.to(dtype=self.dtype)  # switch to float if need + fp16 compatibility
-        return head_mask
+        raise NotImplementedError("TODO(KD): for now we're not masking anything out, so not implemented or tested.")
+        # if head_mask.dim() == 1:
+        #     head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        #     head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
+        # elif head_mask.dim() == 2:
+        #     head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
+        # assert head_mask.dim() == 5, f"head_mask.dim != 5, instead {head_mask.dim()}"
+        # head_mask = head_mask.to(dtype=self.dtype)  # switch to float if need + fp16 compatibility
+        # return head_mask
 
-    def num_parameters(self, only_trainable: bool = False, exclude_embeddings: bool = False) -> int:
-        """
-        Get number of (optionally, trainable or non-embeddings) parameters in the module.
+    # def num_parameters(self, only_trainable: bool = False, exclude_embeddings: bool = False) -> int:
+    #     """
+    #     Get number of (optionally, trainable or non-embeddings) parameters in the module.
 
-        Args:
-            only_trainable (`bool`, *optional*, defaults to `False`):
-                Whether or not to return only the number of trainable parameters
+    #     Args:
+    #         only_trainable (`bool`, *optional*, defaults to `False`):
+    #             Whether or not to return only the number of trainable parameters
 
-            exclude_embeddings (`bool`, *optional*, defaults to `False`):
-                Whether or not to return only the number of non-embeddings parameters
+    #         exclude_embeddings (`bool`, *optional*, defaults to `False`):
+    #             Whether or not to return only the number of non-embeddings parameters
 
-        Returns:
-            `int`: The number of parameters.
-        """
+    #     Returns:
+    #         `int`: The number of parameters.
+    #     """
 
-        if exclude_embeddings:
-            embedding_param_names = [
-                f"{name}.weight" for name, module_type in self.named_modules() if isinstance(module_type, nn.Embedding)
-            ]
-            non_embedding_parameters = [
-                parameter for name, parameter in self.named_parameters() if name not in embedding_param_names
-            ]
-            return sum(p.numel() for p in non_embedding_parameters if p.requires_grad or not only_trainable)
-        else:
-            return sum(p.numel() for p in self.parameters() if p.requires_grad or not only_trainable)
+    #     if exclude_embeddings:
+    #         embedding_param_names = [
+    #             f"{name}.weight" for name, module_type in self.named_modules() if isinstance(module_type, nn.Embedding)
+    #         ]
+    #         non_embedding_parameters = [
+    #             parameter for name, parameter in self.named_parameters() if name not in embedding_param_names
+    #         ]
+    #         return sum(p.numel() for p in non_embedding_parameters if p.requires_grad or not only_trainable)
+    #     else:
+    #         return sum(p.numel() for p in self.parameters() if p.requires_grad or not only_trainable)
 
-    def estimate_tokens(self, input_dict: Dict[str, Union[torch.Tensor, Any]]) -> int:
-        """
-        Helper function to estimate the total number of tokens from the model inputs.
+    # def estimate_tokens(self, input_dict: Dict[str, Union[torch.Tensor, Any]]) -> int:
+    #     """
+    #     Helper function to estimate the total number of tokens from the model inputs.
 
-        Args:
-            inputs (`dict`): The model inputs.
+    #     Args:
+    #         inputs (`dict`): The model inputs.
 
-        Returns:
-            `int`: The total number of tokens.
-        """
-        if not hasattr(self, "warnings_issued"):
-            self.warnings_issued = {}
-        if self.main_input_name in input_dict:
-            return input_dict[self.main_input_name].numel()
-        elif "estimate_tokens" not in self.warnings_issued:
-            logger.warning(
-                "Could not estimate the number of tokens of the input, floating-point operations will not be computed"
-            )
-            self.warnings_issued["estimate_tokens"] = True
-        return 0
+    #     Returns:
+    #         `int`: The total number of tokens.
+    #     """
+    #     if not hasattr(self, "warnings_issued"):
+    #         self.warnings_issued = {}
+    #     if self.main_input_name in input_dict:
+    #         return input_dict[self.main_input_name].numel()
+    #     elif "estimate_tokens" not in self.warnings_issued:
+    #         logger.warning(
+    #             "Could not estimate the number of tokens of the input, floating-point operations will not be computed"
+    #         )
+    #         self.warnings_issued["estimate_tokens"] = True
+    #     return 0
 
-    def floating_point_ops(
-        self, input_dict: Dict[str, Union[torch.Tensor, Any]], exclude_embeddings: bool = True
-    ) -> int:
-        """
-        Get number of (optionally, non-embeddings) floating-point operations for the forward and backward passes of a
-        batch with this transformer model. Default approximation neglects the quadratic dependency on the number of
-        tokens (valid if `12 * d_model << sequence_length`) as laid out in [this
-        paper](https://arxiv.org/pdf/2001.08361.pdf) section 2.1. Should be overridden for transformers with parameter
-        re-use e.g. Albert or Universal Transformers, or if doing long-range modeling with very high sequence lengths.
+    # def floating_point_ops(
+    #     self, input_dict: Dict[str, Union[torch.Tensor, Any]], exclude_embeddings: bool = True
+    # ) -> int:
+    #     """
+    #     Get number of (optionally, non-embeddings) floating-point operations for the forward and backward passes of a
+    #     batch with this transformer model. Default approximation neglects the quadratic dependency on the number of
+    #     tokens (valid if `12 * d_model << sequence_length`) as laid out in [this
+    #     paper](https://arxiv.org/pdf/2001.08361.pdf) section 2.1. Should be overridden for transformers with parameter
+    #     re-use e.g. Albert or Universal Transformers, or if doing long-range modeling with very high sequence lengths.
 
-        Args:
-            batch_size (`int`):
-                The batch size for the forward pass.
+    #     Args:
+    #         batch_size (`int`):
+    #             The batch size for the forward pass.
 
-            sequence_length (`int`):
-                The number of tokens in each line of the batch.
+    #         sequence_length (`int`):
+    #             The number of tokens in each line of the batch.
 
-            exclude_embeddings (`bool`, *optional*, defaults to `True`):
-                Whether or not to count embedding and softmax operations.
+    #         exclude_embeddings (`bool`, *optional*, defaults to `True`):
+    #             Whether or not to count embedding and softmax operations.
 
-        Returns:
-            `int`: The number of floating-point operations.
-        """
+    #     Returns:
+    #         `int`: The number of floating-point operations.
+    #     """
 
-        return 6 * self.estimate_tokens(input_dict) * self.num_parameters(exclude_embeddings=exclude_embeddings)
-
-
-class BackboneMixin:
-    def forward_with_filtered_kwargs(self, *args, **kwargs):
-
-        signature = dict(inspect.signature(self.forward).parameters)
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in signature}
-
-        return self(*args, **filtered_kwargs)
+    #     return 6 * self.estimate_tokens(input_dict) * self.num_parameters(exclude_embeddings=exclude_embeddings)
 
 
-class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMixin):
+class BfPreTrainedModel(Network, BfModuleUtilsMixin):
     r"""
-    Base class for all models.
+    Base class for all BF models.
 
-    [`PreTrainedModel`] takes care of storing the configuration of the models and handles methods for loading,
+    [`BfPreTrainedModel`] takes care of storing the configuration of the models and handles methods for loading,
     downloading and saving models as well as a few methods common to all models to:
 
         - resize the input embeddings,
@@ -999,18 +896,18 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
     supports_gradient_checkpointing = False
 
     @property
-    def dummy_inputs(self) -> Dict[str, torch.Tensor]:
+    def dummy_inputs(self) -> Dict[str, bf.Node]:
         """
         `Dict[str, torch.Tensor]`: Dummy inputs to do a forward pass in the network.
         """
-        return {"input_ids": torch.tensor(DUMMY_INPUTS)}
+        return {"input_ids": bf.Node(DUMMY_INPUTS)}
 
     @property
     def framework(self) -> str:
         """
         :str: Identifies that this is a PyTorch model.
         """
-        return "pt"
+        return "bf"
 
     def __init__(self, config: PretrainedConfig, *inputs, **kwargs):
         super().__init__()
@@ -1031,13 +928,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         modules properly initialized (such as weight initialization).
         """
         self.init_weights()
-        self._backward_compatibility_gradient_checkpointing()
-
-    def _backward_compatibility_gradient_checkpointing(self):
-        if self.supports_gradient_checkpointing and getattr(self.config, "gradient_checkpointing", False):
-            self.gradient_checkpointing_enable()
-            # Remove the attribute now that is has been consumed, so it's no saved in the config.
-            delattr(self.config, "gradient_checkpointing")
 
     @classmethod
     def _from_config(cls, config, **kwargs):
@@ -1048,29 +938,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             torch_dtype (`torch.dtype`, *optional*):
                 Override the default `torch.dtype` and load the model under this dtype.
         """
-        torch_dtype = kwargs.pop("torch_dtype", None)
-
-        # override default dtype if needed
-        dtype_orig = None
-        if torch_dtype is not None:
-            dtype_orig = cls._set_default_torch_dtype(torch_dtype)
-
-        if is_deepspeed_zero3_enabled():
-            import deepspeed
-
-            logger.info("Detected DeepSpeed ZeRO-3: activating zero.init() for this model")
-            # this immediately partitions the model across all gpus, to avoid the overhead in time
-            # and memory copying it on CPU or each GPU first
-            with deepspeed.zero.Init(config_dict_or_path=deepspeed_config()):
-                model = cls(config, **kwargs)
-        else:
-            model = cls(config, **kwargs)
-
-        # restore default dtype if it was modified
-        if dtype_orig is not None:
-            torch.set_default_dtype(dtype_orig)
-
-        return model
+        return cls(config, **kwargs)
 
     @classmethod
     def _set_default_torch_dtype(cls, dtype: torch.dtype) -> torch.dtype:
@@ -1155,7 +1023,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         weights instead.
         """
         if getattr(self.config, "tie_word_embeddings", True):
-            output_embeddings = self.get_output_embeddings()
+            output_embeddings = (
+                self.get_output_embeddings()
+            )  # DONE(KD): this is None for BF, check if this should be none for Torch? - confirmed!
             if output_embeddings is not None:
                 self._tie_or_clone_weights(output_embeddings, self.get_input_embeddings())
 
@@ -1170,96 +1040,18 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
 
     @staticmethod
     def _tie_encoder_decoder_weights(encoder: nn.Module, decoder: nn.Module, base_model_prefix: str):
-        uninitialized_encoder_weights: List[str] = []
-        if decoder.__class__ != encoder.__class__:
-            logger.info(
-                f"{decoder.__class__} and {encoder.__class__} are not equal. In this case make sure that all encoder"
-                " weights are correctly initialized."
-            )
-
-        def tie_encoder_to_decoder_recursively(
-            decoder_pointer: nn.Module,
-            encoder_pointer: nn.Module,
-            module_name: str,
-            uninitialized_encoder_weights: List[str],
-            depth=0,
-        ):
-            assert isinstance(decoder_pointer, nn.Module) and isinstance(
-                encoder_pointer, nn.Module
-            ), f"{decoder_pointer} and {encoder_pointer} have to be of type nn.Module"
-            if hasattr(decoder_pointer, "weight"):
-                assert hasattr(encoder_pointer, "weight")
-                encoder_pointer.weight = decoder_pointer.weight
-                if hasattr(decoder_pointer, "bias"):
-                    assert hasattr(encoder_pointer, "bias")
-                    encoder_pointer.bias = decoder_pointer.bias
-                return
-
-            encoder_modules = encoder_pointer._modules
-            decoder_modules = decoder_pointer._modules
-            if len(decoder_modules) > 0:
-                assert (
-                    len(encoder_modules) > 0
-                ), f"Encoder module {encoder_pointer} does not match decoder module {decoder_pointer}"
-
-                all_encoder_weights = set([module_name + "/" + sub_name for sub_name in encoder_modules.keys()])
-                encoder_layer_pos = 0
-                for name, module in decoder_modules.items():
-                    if name.isdigit():
-                        encoder_name = str(int(name) + encoder_layer_pos)
-                        decoder_name = name
-                        if not isinstance(decoder_modules[decoder_name], type(encoder_modules[encoder_name])) and len(
-                            encoder_modules
-                        ) != len(decoder_modules):
-                            # this can happen if the name corresponds to the position in a list module list of layers
-                            # in this case the decoder has added a cross-attention that the encoder does not have
-                            # thus skip this step and subtract one layer pos from encoder
-                            encoder_layer_pos -= 1
-                            continue
-                    elif name not in encoder_modules:
-                        continue
-                    elif depth > 500:
-                        raise ValueError(
-                            "Max depth of recursive function `tie_encoder_to_decoder` reached. It seems that there is"
-                            " a circular dependency between two or more `nn.Modules` of your model."
-                        )
-                    else:
-                        decoder_name = encoder_name = name
-                    tie_encoder_to_decoder_recursively(
-                        decoder_modules[decoder_name],
-                        encoder_modules[encoder_name],
-                        module_name + "/" + name,
-                        uninitialized_encoder_weights,
-                        depth=depth + 1,
-                    )
-                    all_encoder_weights.remove(module_name + "/" + encoder_name)
-
-                uninitialized_encoder_weights += list(all_encoder_weights)
-
-        # tie weights recursively
-        tie_encoder_to_decoder_recursively(decoder, encoder, base_model_prefix, uninitialized_encoder_weights)
-        if len(uninitialized_encoder_weights) > 0:
-            logger.warning(
-                f"The following encoder weights were not tied to the decoder {uninitialized_encoder_weights}"
-            )
+        raise NotImplementedError("This isn't used for BERT so NotImplemented for now!")
 
     def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
-        """Tie or clone module weights depending of whether we are using TorchScript or not"""
-        if self.config.torchscript:
-            output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
-        else:
-            output_embeddings.weight = input_embeddings.weight
+        """Tie module weights"""
+        output_embeddings.weight = input_embeddings.weight
 
         if getattr(output_embeddings, "bias", None) is not None:
-            output_embeddings.bias.data = nn.functional.pad(
-                output_embeddings.bias.data,
-                (
-                    0,
-                    output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0],
-                ),
-                "constant",
-                0,
-            )
+            if output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0] != 0:
+                raise NotImplementedError(
+                    "ERROR: if output_embeddings.weight.shape[0] and output_embeddings.bias.shape[0] are not the same, we need to implement padding."
+                )
+
         if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
             output_embeddings.out_features = input_embeddings.num_embeddings
 
@@ -1989,56 +1781,14 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         load_in_8bit_skip_modules = kwargs.pop("load_in_8bit_skip_modules", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
-        to_bf = kwargs.pop("to_bf", False) # whether to load pt weights into a brunoflow model
+        to_bf = kwargs.pop("to_bf", False)  # whether to load pt weights into a brunoflow model
 
-        if trust_remote_code is True:
-            logger.warning(
-                "The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is"
-                " ignored."
-            )
-        if device_map is not None:
-            if low_cpu_mem_usage is None:
-                low_cpu_mem_usage = True
-            elif not low_cpu_mem_usage:
-                raise ValueError("Passing along a `device_map` requires `low_cpu_mem_usage=True`")
-
-        if low_cpu_mem_usage:
-            # low_cpu_mem_usage requires PyTorch >= 1.9 to have the meta device.
-            require_version_core("torch>=1.9")
-            if device_map is not None:
-                # The max memory utils require PyTorch >= 1.10 to have torch.cuda.mem_get_info.
-                require_version_core("torch>=1.10")
-
-            if is_deepspeed_zero3_enabled():
-                raise ValueError(
-                    "DeepSpeed Zero-3 is not compatible with `low_cpu_mem_usage=True` or with passing a `device_map`."
-                )
-            elif not is_accelerate_available():
-                raise ImportError(
-                    "Using `low_cpu_mem_usage=True` or a `device_map` requires Accelerate: `pip install accelerate`"
-                )
-
-        if load_in_8bit:
-            if not (is_accelerate_available() and is_bitsandbytes_available()):
-                raise ImportError(
-                    "Using `load_in_8bit=True` requires Accelerate: `pip install accelerate` and the latest version of"
-                    " bitsandbytes `pip install -i https://test.pypi.org/simple/ bitsandbytes` or"
-                    " pip install bitsandbytes` "
-                )
-            if torch_dtype == "auto" or torch_dtype != torch.float16:
-                # We force the `dtype` to be float16, this is a requirement from `bitsandbytes`
-                torch_dtype = torch.float16
-                logger.info("Loading the model in mixed int8 - forcing the weights to be casted in float16")
-            if device_map is None:
-                raise ValueError(
-                    "A device map needs to be passed to run convert models into mixed-int8 format. Please run"
-                    "`.from_pretrained` with `device_map='auto'`"
-                )
-            if from_tf or from_flax:
-                raise ValueError(
-                    "Converting into mixed 8-bit weights from tf/flax weights is currently not supported, please make"
-                    " sure the weights are in PyTorch format."
-                )
+        unused_props = [trust_remote_code, max_memory, load_in_8bit_threshold, load_in_8bit_skip_modules]
+        default_vals_for_unused_props = [None, None, 6.0, None]
+        assert len(unused_props) == len(default_vals_for_unused_props)
+        for i in range(len(unused_props)):
+            if unused_props[i] != default_vals_for_unused_props[i]:
+                raise ValueError(f"Expected all unused properties to be None, instead one they were {unused_props}")
 
         from_pt = not (from_tf | from_flax)
 
@@ -2253,23 +2003,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         else:
             resolved_archive_file = None
 
-        # We'll need to download and cache each checkpoint shard if the checkpoint is sharded.
-        if is_sharded:
-            # rsolved_archive_file becomes a list of files that point to the different checkpoint shards in this case.
-            resolved_archive_file, sharded_metadata = get_checkpoint_shard_files(
-                pretrained_model_name_or_path,
-                resolved_archive_file,
-                cache_dir=cache_dir,
-                force_download=force_download,
-                proxies=proxies,
-                resume_download=resume_download,
-                local_files_only=local_files_only,
-                use_auth_token=use_auth_token,
-                user_agent=user_agent,
-                revision=revision,
-                subfolder=subfolder,
-                _commit_hash=commit_hash,
-            )
+        # TODO(KD): if we ever want sharding, implement this here (see modeling_utils.py for reference.)
 
         # load pt weights early so that we know which dtype to init the model under
         if from_pt:
@@ -2326,15 +2060,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
 
         # Instantiate model.
         init_contexts = [no_init_weights(_enable=_fast_init)]
-
-        if is_deepspeed_zero3_enabled():
-            import deepspeed
-
-            logger.info("Detected DeepSpeed ZeRO-3: activating zero.init() for this model")
-            init_contexts = [deepspeed.zero.Init(config_dict_or_path=deepspeed_config())] + init_contexts
-        elif load_in_8bit or low_cpu_mem_usage:
-            init_contexts.append(init_empty_weights())
-
         with ContextManagers(init_contexts):
             model = cls(config, *model_args, **model_kwargs)
 
@@ -2344,69 +2069,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             keep_in_fp32_modules = model._keep_in_fp32_modules
         else:
             keep_in_fp32_modules = []
-
-        if load_in_8bit:
-            from .utils.bitsandbytes import get_keys_to_not_convert, replace_8bit_linear
-
-            logger.info("Detected 8-bit loading: activating 8-bit loading for this model")
-
-            # We keep some modules such as the lm_head in their original dtype for numerical stability reasons
-            if load_in_8bit_skip_modules is None:
-                modules_to_not_convert = get_keys_to_not_convert(model)
-            else:
-                modules_to_not_convert = load_in_8bit_skip_modules
-
-            if not isinstance(modules_to_not_convert, list):
-                modules_to_not_convert = [modules_to_not_convert]
-
-            modules_to_not_convert.extend(keep_in_fp32_modules)
-
-            model = replace_8bit_linear(
-                model, threshold=load_in_8bit_threshold, modules_to_not_convert=modules_to_not_convert
-            )
-
-        if isinstance(device_map, str):
-            if model._no_split_modules is None:
-                raise ValueError(f"{model.__class__.__name__} does not support `device_map='{device_map}'` yet.")
-            no_split_modules = model._no_split_modules
-            if device_map not in ["auto", "balanced", "balanced_low_0", "sequential"]:
-                raise ValueError(
-                    "If passing a string for `device_map`, please choose 'auto', 'balanced', 'balanced_low_0' or "
-                    "'sequential'."
-                )
-            elif device_map in ["balanced", "balanced_low_0"] and get_balanced_memory is None:
-                raise ValueError(f"`device_map={device_map}` requires a source install of Accelerate.")
-            if device_map != "sequential" and get_balanced_memory is not None:
-                max_memory = get_balanced_memory(
-                    model,
-                    max_memory=max_memory,
-                    no_split_module_classes=no_split_modules,
-                    dtype=torch_dtype,
-                    low_zero=(device_map == "balanced_low_0"),
-                )
-            # Make sure tied weights are tied before creating the device map.
-            model.tie_weights()
-            device_map = infer_auto_device_map(
-                model,
-                no_split_module_classes=no_split_modules,
-                dtype=torch_dtype if not load_in_8bit else torch.int8,
-                max_memory=max_memory,
-            )
-
-            if load_in_8bit:
-                # The LM head / tied weights or any last module can stay on disk / CPU
-                device_map_without_lm_head = {
-                    key: device_map[key] for key in device_map.keys() if key not in modules_to_not_convert
-                }
-                if "cpu" in device_map_without_lm_head.values() or "disk" in device_map_without_lm_head.values():
-                    raise ValueError(
-                        """
-                        Some modules are dispatched on the CPU or the disk. Make sure you have enough GPU RAM to fit
-                        the quantized model. If you have set a value for `max_memory` you should increase that. To have
-                        an idea of the modules that are set on the CPU or RAM you can print model.hf_device_map.
-                        """
-                    )
-                del device_map_without_lm_head
 
         if from_tf:
             if resolved_archive_file.endswith(".index"):
@@ -2470,19 +2132,15 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                     dtype=torch_dtype,
                     load_in_8bit=load_in_8bit,
                     keep_in_fp32_modules=keep_in_fp32_modules,
-                )
+                )  # TODO(KD): check outputs here
 
         model.is_loaded_in_8bit = load_in_8bit
 
         # make sure token embedding weights are still tied if needed
-        model.tie_weights()
+        model.tie_weights()  # yay this might not be needed actually - CONFIRMED
 
         # Set model in evaluation mode to deactivate DropOut modules by default
-        model.eval()
-
-        # Dispatch model with hooks on all devices if necessary
-        if device_map is not None:
-            dispatch_model(model, device_map=device_map, offload_dir=offload_folder, offload_index=offload_index)
+        model.eval()  # TODO: implement something so that dropout can go on/off
 
         if output_loading_info:
             if loading_info is None:
@@ -2516,29 +2174,13 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         keep_in_fp32_modules=None,
     ):
         is_safetensors = False
-        if load_in_8bit:
-            from .utils.bitsandbytes import set_module_8bit_tensor_to_device
-
-        if device_map is not None and "disk" in device_map.values():
-            archive_file = (
-                resolved_archive_file[0] if isinstance(resolved_archive_file, (list, tuple)) else resolved_archive_file
-            )
-            is_safetensors = archive_file.endswith(".safetensors")
-            if offload_folder is None and not is_safetensors:
-                raise ValueError(
-                    "The current `device_map` had weights offloaded to the disk. Please provide an `offload_folder`"
-                    " for them. Alternatively, make sure you have `safetensors` installed if the model you are using"
-                    " offers the weights in this format."
-                )
-            if offload_folder is not None:
-                os.makedirs(offload_folder, exist_ok=True)
-            if offload_state_dict is None:
-                offload_state_dict = True
 
         is_sharded_safetensors = is_safetensors and sharded_metadata is not None
         # Retrieve missing & unexpected_keys
-        model_state_dict = model.state_dict()
-        expected_keys = list(model_state_dict.keys())
+        model_state_dict = model.state_dict()  # TODO(KD): maybe compare the BF and torch state dicts?
+        expected_keys = list(
+            model_state_dict.keys()
+        )  # with BfBertModel this is 200; TODO(KD): check if this is correct.
         prefix = model.base_model_prefix
 
         def _fix_key(key):
@@ -2570,7 +2212,9 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         elif add_prefix_to_model:
             expected_keys = [".".join([prefix, s]) for s in expected_keys]
 
-        missing_keys = list(set(expected_keys) - set(loaded_keys))
+        missing_keys = list(
+            set(expected_keys) - set(loaded_keys)
+        )  # TODO(KD): with BfBertModel this is apparently missing ['bert.embeddings.position_ids']; check if this is right.
         unexpected_keys = list(set(loaded_keys) - set(expected_keys))
 
         # Some models may have keys that are not in the state by design, removing them before needlessly warning
@@ -2582,31 +2226,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         if cls._keys_to_ignore_on_load_unexpected is not None:
             for pat in cls._keys_to_ignore_on_load_unexpected:
                 unexpected_keys = [k for k in unexpected_keys if re.search(pat, k) is None]
-
-        # retrieve weights on meta device and put them back on CPU.
-        # This is not ideal in terms of memory, but if we don't do that not, we can't initialize them in the next step
-        if low_cpu_mem_usage:
-            for key in missing_keys:
-                if key.startswith(prefix):
-                    key = ".".join(key.split(".")[1:])
-                param = model_state_dict[key]
-
-                # upcast in fp32 if any
-                target_dtype = dtype
-                if (
-                    keep_in_fp32_modules is not None
-                    and dtype == torch.float16
-                    and any(module_to_keep_in_fp32 in key for module_to_keep_in_fp32 in keep_in_fp32_modules)
-                ):
-                    target_dtype = torch.float32
-
-                if param.device == torch.device("meta"):
-                    if not load_in_8bit:
-                        set_module_tensor_to_device(model, key, "cpu", torch.empty(*param.size(), dtype=target_dtype))
-                    else:
-                        set_module_8bit_tensor_to_device(
-                            model, key, "cpu", torch.empty(*param.size(), dtype=target_dtype)
-                        )
 
         # retrieve unintialized modules and initialize before maybe overriding that with the pretrained weights.
         if _fast_init:
@@ -2620,6 +2239,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         if keep_in_fp32_modules is not None:
             for name, param in model.named_parameters():
                 if any(module_to_keep_in_fp32 in name for module_to_keep_in_fp32 in keep_in_fp32_modules):
+                    raise NotImplementedError("keep_in_fp32_modules isn't implemented, this should never be hit!")
                     param = param.to(torch.float32)
 
         # Make sure we are able to load base models as well as derived models (with heads)
@@ -2668,24 +2288,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             return mismatched_keys
 
         folder = os.path.sep.join(resolved_archive_file[0].split(os.path.sep)[:-1])
-        if device_map is not None and is_safetensors:
-            param_device_map = expand_device_map(device_map, original_loaded_keys)
-
-            str_dtype = str(dtype).replace("torch.", "") if dtype is not None else "float32"
-            if sharded_metadata is None:
-                archive_file = (
-                    resolved_archive_file[0]
-                    if isinstance(resolved_archive_file, (list, tuple))
-                    else resolved_archive_file
-                )
-                weight_map = {p: archive_file for p in original_loaded_keys}
-            else:
-                weight_map = {p: os.path.join(folder, f) for p, f in sharded_metadata["weight_map"].items()}
-            offload_index = {
-                p: {"safetensors_file": f, "weight_name": p, "dtype": str_dtype}
-                for p, f in weight_map.items()
-                if param_device_map[p] == "disk"
-            }
 
         if state_dict is not None:
             # Whole checkpoint
@@ -2834,7 +2436,14 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 " to use it for predictions and inference."
             )
 
-        return model, missing_keys, unexpected_keys, mismatched_keys, offload_index, error_msgs
+        return (
+            model,
+            missing_keys,
+            unexpected_keys,
+            mismatched_keys,
+            offload_index,
+            error_msgs,
+        )  # TODO(KD) MAJOR: check if the output of this function matches torch
 
     def retrieve_modules_from_names(self, names, add_prefix=False, remove_prefix=False):
         module_keys = set([".".join(key.split(".")[:-1]) for key in names])
@@ -2908,333 +2517,6 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             raise ValueError(f"{auto_class} is not a valid auto class.")
 
         cls._auto_class = auto_class
-
-
-PreTrainedModel.push_to_hub = copy_func(PreTrainedModel.push_to_hub)
-if PreTrainedModel.push_to_hub.__doc__ is not None:
-    PreTrainedModel.push_to_hub.__doc__ = PreTrainedModel.push_to_hub.__doc__.format(
-        object="model", object_class="AutoModel", object_files="model file"
-    )
-
-
-class PoolerStartLogits(nn.Module):
-    """
-    Compute SQuAD start logits from sequence hidden states.
-
-    Args:
-        config ([`PretrainedConfig`]):
-            The config used by the model, will be used to grab the `hidden_size` of the model.
-    """
-
-    def __init__(self, config: PretrainedConfig):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, 1)
-
-    def forward(
-        self, hidden_states: torch.FloatTensor, p_mask: Optional[torch.FloatTensor] = None
-    ) -> torch.FloatTensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor` of shape `(batch_size, seq_len, hidden_size)`):
-                The final hidden states of the model.
-            p_mask (`torch.FloatTensor` of shape `(batch_size, seq_len)`, *optional*):
-                Mask for tokens at invalid position, such as query and special symbols (PAD, SEP, CLS). 1.0 means token
-                should be masked.
-
-        Returns:
-            `torch.FloatTensor`: The start logits for SQuAD.
-        """
-        x = self.dense(hidden_states).squeeze(-1)
-
-        if p_mask is not None:
-            if get_parameter_dtype(self) == torch.float16:
-                x = x * (1 - p_mask) - 65500 * p_mask
-            else:
-                x = x * (1 - p_mask) - 1e30 * p_mask
-
-        return x
-
-
-class PoolerEndLogits(nn.Module):
-    """
-    Compute SQuAD end logits from sequence hidden states.
-
-    Args:
-        config ([`PretrainedConfig`]):
-            The config used by the model, will be used to grab the `hidden_size` of the model and the `layer_norm_eps`
-            to use.
-    """
-
-    def __init__(self, config: PretrainedConfig):
-        super().__init__()
-        self.dense_0 = nn.Linear(config.hidden_size * 2, config.hidden_size)
-        self.activation = nn.Tanh()
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dense_1 = nn.Linear(config.hidden_size, 1)
-
-    def forward(
-        self,
-        hidden_states: torch.FloatTensor,
-        start_states: Optional[torch.FloatTensor] = None,
-        start_positions: Optional[torch.LongTensor] = None,
-        p_mask: Optional[torch.FloatTensor] = None,
-    ) -> torch.FloatTensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor` of shape `(batch_size, seq_len, hidden_size)`):
-                The final hidden states of the model.
-            start_states (`torch.FloatTensor` of shape `(batch_size, seq_len, hidden_size)`, *optional*):
-                The hidden states of the first tokens for the labeled span.
-            start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                The position of the first token for the labeled span.
-            p_mask (`torch.FloatTensor` of shape `(batch_size, seq_len)`, *optional*):
-                Mask for tokens at invalid position, such as query and special symbols (PAD, SEP, CLS). 1.0 means token
-                should be masked.
-
-        <Tip>
-
-        One of `start_states` or `start_positions` should be not `None`. If both are set, `start_positions` overrides
-        `start_states`.
-
-        </Tip>
-
-        Returns:
-            `torch.FloatTensor`: The end logits for SQuAD.
-        """
-        assert (
-            start_states is not None or start_positions is not None
-        ), "One of start_states, start_positions should be not None"
-        if start_positions is not None:
-            slen, hsz = hidden_states.shape[-2:]
-            start_positions = start_positions[:, None, None].expand(-1, -1, hsz)  # shape (bsz, 1, hsz)
-            start_states = hidden_states.gather(-2, start_positions)  # shape (bsz, 1, hsz)
-            start_states = start_states.expand(-1, slen, -1)  # shape (bsz, slen, hsz)
-
-        x = self.dense_0(torch.cat([hidden_states, start_states], dim=-1))
-        x = self.activation(x)
-        x = self.LayerNorm(x)
-        x = self.dense_1(x).squeeze(-1)
-
-        if p_mask is not None:
-            if get_parameter_dtype(self) == torch.float16:
-                x = x * (1 - p_mask) - 65500 * p_mask
-            else:
-                x = x * (1 - p_mask) - 1e30 * p_mask
-
-        return x
-
-
-class PoolerAnswerClass(nn.Module):
-    """
-    Compute SQuAD 2.0 answer class from classification and start tokens hidden states.
-
-    Args:
-        config ([`PretrainedConfig`]):
-            The config used by the model, will be used to grab the `hidden_size` of the model.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        self.dense_0 = nn.Linear(config.hidden_size * 2, config.hidden_size)
-        self.activation = nn.Tanh()
-        self.dense_1 = nn.Linear(config.hidden_size, 1, bias=False)
-
-    def forward(
-        self,
-        hidden_states: torch.FloatTensor,
-        start_states: Optional[torch.FloatTensor] = None,
-        start_positions: Optional[torch.LongTensor] = None,
-        cls_index: Optional[torch.LongTensor] = None,
-    ) -> torch.FloatTensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor` of shape `(batch_size, seq_len, hidden_size)`):
-                The final hidden states of the model.
-            start_states (`torch.FloatTensor` of shape `(batch_size, seq_len, hidden_size)`, *optional*):
-                The hidden states of the first tokens for the labeled span.
-            start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                The position of the first token for the labeled span.
-            cls_index (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                Position of the CLS token for each sentence in the batch. If `None`, takes the last token.
-
-        <Tip>
-
-        One of `start_states` or `start_positions` should be not `None`. If both are set, `start_positions` overrides
-        `start_states`.
-
-        </Tip>
-
-        Returns:
-            `torch.FloatTensor`: The SQuAD 2.0 answer class.
-        """
-        # No dependency on end_feature so that we can obtain one single `cls_logits` for each sample.
-        hsz = hidden_states.shape[-1]
-        assert (
-            start_states is not None or start_positions is not None
-        ), "One of start_states, start_positions should be not None"
-        if start_positions is not None:
-            start_positions = start_positions[:, None, None].expand(-1, -1, hsz)  # shape (bsz, 1, hsz)
-            start_states = hidden_states.gather(-2, start_positions).squeeze(-2)  # shape (bsz, hsz)
-
-        if cls_index is not None:
-            cls_index = cls_index[:, None, None].expand(-1, -1, hsz)  # shape (bsz, 1, hsz)
-            cls_token_state = hidden_states.gather(-2, cls_index).squeeze(-2)  # shape (bsz, hsz)
-        else:
-            cls_token_state = hidden_states[:, -1, :]  # shape (bsz, hsz)
-
-        x = self.dense_0(torch.cat([start_states, cls_token_state], dim=-1))
-        x = self.activation(x)
-        x = self.dense_1(x).squeeze(-1)
-
-        return x
-
-
-@dataclass
-class SquadHeadOutput(ModelOutput):
-    """
-    Base class for outputs of question answering models using a [`~modeling_utils.SQuADHead`].
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned if both `start_positions` and `end_positions` are provided):
-            Classification loss as the sum of start token, end token (and is_impossible if provided) classification
-            losses.
-        start_top_log_probs (`torch.FloatTensor` of shape `(batch_size, config.start_n_top)`, *optional*, returned if `start_positions` or `end_positions` is not provided):
-            Log probabilities for the top config.start_n_top start token possibilities (beam-search).
-        start_top_index (`torch.LongTensor` of shape `(batch_size, config.start_n_top)`, *optional*, returned if `start_positions` or `end_positions` is not provided):
-            Indices for the top config.start_n_top start token possibilities (beam-search).
-        end_top_log_probs (`torch.FloatTensor` of shape `(batch_size, config.start_n_top * config.end_n_top)`, *optional*, returned if `start_positions` or `end_positions` is not provided):
-            Log probabilities for the top `config.start_n_top * config.end_n_top` end token possibilities
-            (beam-search).
-        end_top_index (`torch.LongTensor` of shape `(batch_size, config.start_n_top * config.end_n_top)`, *optional*, returned if `start_positions` or `end_positions` is not provided):
-            Indices for the top `config.start_n_top * config.end_n_top` end token possibilities (beam-search).
-        cls_logits (`torch.FloatTensor` of shape `(batch_size,)`, *optional*, returned if `start_positions` or `end_positions` is not provided):
-            Log probabilities for the `is_impossible` label of the answers.
-
-    """
-
-    loss: Optional[torch.FloatTensor] = None
-    start_top_log_probs: Optional[torch.FloatTensor] = None
-    start_top_index: Optional[torch.LongTensor] = None
-    end_top_log_probs: Optional[torch.FloatTensor] = None
-    end_top_index: Optional[torch.LongTensor] = None
-    cls_logits: Optional[torch.FloatTensor] = None
-
-
-class SQuADHead(nn.Module):
-    r"""
-    A SQuAD head inspired by XLNet.
-
-    Args:
-        config ([`PretrainedConfig`]):
-            The config used by the model, will be used to grab the `hidden_size` of the model and the `layer_norm_eps`
-            to use.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        self.start_n_top = config.start_n_top
-        self.end_n_top = config.end_n_top
-
-        self.start_logits = PoolerStartLogits(config)
-        self.end_logits = PoolerEndLogits(config)
-        self.answer_class = PoolerAnswerClass(config)
-
-    @replace_return_docstrings(output_type=SquadHeadOutput, config_class=PretrainedConfig)
-    def forward(
-        self,
-        hidden_states: torch.FloatTensor,
-        start_positions: Optional[torch.LongTensor] = None,
-        end_positions: Optional[torch.LongTensor] = None,
-        cls_index: Optional[torch.LongTensor] = None,
-        is_impossible: Optional[torch.LongTensor] = None,
-        p_mask: Optional[torch.FloatTensor] = None,
-        return_dict: bool = False,
-    ) -> Union[SquadHeadOutput, Tuple[torch.FloatTensor]]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor` of shape `(batch_size, seq_len, hidden_size)`):
-                Final hidden states of the model on the sequence tokens.
-            start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                Positions of the first token for the labeled span.
-            end_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                Positions of the last token for the labeled span.
-            cls_index (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                Position of the CLS token for each sentence in the batch. If `None`, takes the last token.
-            is_impossible (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-                Whether the question has a possible answer in the paragraph or not.
-            p_mask (`torch.FloatTensor` of shape `(batch_size, seq_len)`, *optional*):
-                Mask for tokens at invalid position, such as query and special symbols (PAD, SEP, CLS). 1.0 means token
-                should be masked.
-            return_dict (`bool`, *optional*, defaults to `False`):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-
-        Returns:
-        """
-        start_logits = self.start_logits(hidden_states, p_mask=p_mask)
-
-        if start_positions is not None and end_positions is not None:
-            # If we are on multi-GPU, let's remove the dimension added by batch splitting
-            for x in (start_positions, end_positions, cls_index, is_impossible):
-                if x is not None and x.dim() > 1:
-                    x.squeeze_(-1)
-
-            # during training, compute the end logits based on the ground truth of the start position
-            end_logits = self.end_logits(hidden_states, start_positions=start_positions, p_mask=p_mask)
-
-            loss_fct = CrossEntropyLoss()
-            start_loss = loss_fct(start_logits, start_positions)
-            end_loss = loss_fct(end_logits, end_positions)
-            total_loss = (start_loss + end_loss) / 2
-
-            if cls_index is not None and is_impossible is not None:
-                # Predict answerability from the representation of CLS and START
-                cls_logits = self.answer_class(hidden_states, start_positions=start_positions, cls_index=cls_index)
-                loss_fct_cls = nn.BCEWithLogitsLoss()
-                cls_loss = loss_fct_cls(cls_logits, is_impossible)
-
-                # note(zhiliny): by default multiply the loss by 0.5 so that the scale is comparable to start_loss and end_loss
-                total_loss += cls_loss * 0.5
-
-            return SquadHeadOutput(loss=total_loss) if return_dict else (total_loss,)
-
-        else:
-            # during inference, compute the end logits based on beam search
-            bsz, slen, hsz = hidden_states.size()
-            start_log_probs = nn.functional.softmax(start_logits, dim=-1)  # shape (bsz, slen)
-
-            start_top_log_probs, start_top_index = torch.topk(
-                start_log_probs, self.start_n_top, dim=-1
-            )  # shape (bsz, start_n_top)
-            start_top_index_exp = start_top_index.unsqueeze(-1).expand(-1, -1, hsz)  # shape (bsz, start_n_top, hsz)
-            start_states = torch.gather(hidden_states, -2, start_top_index_exp)  # shape (bsz, start_n_top, hsz)
-            start_states = start_states.unsqueeze(1).expand(-1, slen, -1, -1)  # shape (bsz, slen, start_n_top, hsz)
-
-            hidden_states_expanded = hidden_states.unsqueeze(2).expand_as(
-                start_states
-            )  # shape (bsz, slen, start_n_top, hsz)
-            p_mask = p_mask.unsqueeze(-1) if p_mask is not None else None
-            end_logits = self.end_logits(hidden_states_expanded, start_states=start_states, p_mask=p_mask)
-            end_log_probs = nn.functional.softmax(end_logits, dim=1)  # shape (bsz, slen, start_n_top)
-
-            end_top_log_probs, end_top_index = torch.topk(
-                end_log_probs, self.end_n_top, dim=1
-            )  # shape (bsz, end_n_top, start_n_top)
-            end_top_log_probs = end_top_log_probs.view(-1, self.start_n_top * self.end_n_top)
-            end_top_index = end_top_index.view(-1, self.start_n_top * self.end_n_top)
-
-            start_states = torch.einsum("blh,bl->bh", hidden_states, start_log_probs)
-            cls_logits = self.answer_class(hidden_states, start_states=start_states, cls_index=cls_index)
-
-            if not return_dict:
-                return (start_top_log_probs, start_top_index, end_top_log_probs, end_top_index, cls_logits)
-            else:
-                return SquadHeadOutput(
-                    start_top_log_probs=start_top_log_probs,
-                    start_top_index=start_top_index,
-                    end_top_log_probs=end_top_log_probs,
-                    end_top_index=end_top_index,
-                    cls_logits=cls_logits,
-                )
 
 
 class SequenceSummary(nn.Module):
