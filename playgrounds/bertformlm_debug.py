@@ -23,13 +23,13 @@ from utils import check_bf_param_weights_match_torch
 
 # model = BertModel.from_pretrained("google/bert_uncased_L-2_H-128_A-2")
 
-model = BertModel.from_pretrained("bert-base-uncased")
-bf_model = BfBertModel.from_pretrained("bert-base-uncased")
-check_bf_param_weights_match_torch(bf_model, model)  # YAY THIS WORKS!!!
+# model = BertModel.from_pretrained("bert-base-uncased")
+# bf_model = BfBertModel.from_pretrained("bert-base-uncased")
+# check_bf_param_weights_match_torch(bf_model, model)  # YAY THIS WORKS!!!
 
-# model = BertForMaskedLM.from_pretrained("bert-base-uncased")
-# bf_model = BfBertForMaskedLM.from_pretrained("bert-base-uncased")
-# check_bf_param_weights_match_torch(bf_model, model) # YAY THIS WORKS!!!
+model = BertForMaskedLM.from_pretrained("bert-base-uncased")
+bf_model = BfBertForMaskedLM.from_pretrained("bert-base-uncased")
+check_bf_param_weights_match_torch(bf_model, model)  # YAY THIS WORKS!!!
 
 
 # config = BertConfig.from_pretrained(

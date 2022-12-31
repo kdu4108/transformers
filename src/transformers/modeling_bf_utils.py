@@ -2137,7 +2137,7 @@ class BfPreTrainedModel(Network, BfModuleUtilsMixin):
         model.is_loaded_in_8bit = load_in_8bit
 
         # make sure token embedding weights are still tied if needed
-        model.tie_weights()  # yay this might not be needed actually - CONFIRMED
+        model.tie_weights()
 
         # Set model in evaluation mode to deactivate DropOut modules by default
         model.eval()  # TODO: implement something so that dropout can go on/off
