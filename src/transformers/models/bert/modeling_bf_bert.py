@@ -916,7 +916,7 @@ class BfBertModel(BfBertPreTrainedModel):
         if token_type_ids is None:
             if hasattr(self.embeddings, "token_type_ids"):
                 buffered_token_type_ids = self.embeddings.token_type_ids[:, :seq_length]
-                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(batch_size, seq_length)
+                buffered_token_type_ids_expanded = bf.repeat(buffered_token_type_ids, n=input_shape[0], axis=0)
                 token_type_ids = buffered_token_type_ids_expanded
             else:
                 token_type_ids = bf.Node(jnp.zeros(input_shape, dtype=jnp.int64))
@@ -925,7 +925,7 @@ class BfBertModel(BfBertPreTrainedModel):
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: bf.Node = self.get_extended_attention_mask(
             attention_mask, input_shape
-        )  # TODO(KD): implement this!
+        )  # KD: implemented, except for when self.config.is_decoder=True
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
@@ -936,7 +936,7 @@ class BfBertModel(BfBertPreTrainedModel):
                 encoder_attention_mask = bf.Node(jnp.ones(encoder_hidden_shape))
             encoder_extended_attention_mask = self.invert_attention_mask(
                 encoder_attention_mask
-            )  # TODO(KD): implement this!
+            )  # TODO(KD): implement this when we need to use decoders!
         else:
             encoder_extended_attention_mask = None
 

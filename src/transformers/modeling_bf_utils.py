@@ -715,8 +715,8 @@ class BfModuleUtilsMixin:
             # - if the model is a decoder, apply a causal mask in addition to the padding mask
             # - if the model is an encoder, make the mask broadcastable to [batch_size, num_heads, seq_length, seq_length]
             if self.config.is_decoder:
-                extended_attention_mask = ModuleUtilsMixin.create_extended_attention_mask_for_decoder(
-                    input_shape, attention_mask
+                raise NotImplementedError(
+                    "create_extended_attention_mask_for_decoder not implemented, so get_extended_attention_mask doesn't is not yet implemented when self.config.is_decoder=True."
                 )
             else:
                 extended_attention_mask = attention_mask[:, None, None, :]
