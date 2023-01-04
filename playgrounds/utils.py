@@ -26,6 +26,23 @@ def check_bf_param_weights_match_torch(bf_network: Network, torch_module: Module
         ), f"Value of param {name} for bf and torch are not equal."
 
 
+def check_bf_buffers_match_torch(bf_network: Network, torch_module: Module):
+    """Used to verify the weights of the bf model and torch module are equal."""
+    bf_buffers = {name: param for name, param in bf_network.named_buffers()}
+    torch_buffers = {name: param for name, param in torch_module.named_buffers()}
+    assert set(bf_buffers.keys()) == set(
+        torch_buffers.keys()
+    ), f"BF and torch keys do not match: BF contains following extra keys {set(bf_buffers.keys()).difference(set(torch_buffers.keys()))} and is missing keys {set(torch_buffers.keys()).difference(set(bf_buffers.keys()))}"
+
+    for name in bf_buffers.keys():
+        print(
+            f"Value of param weight {name} for bf and torch are equal? {check_node_equals_tensor(bf_buffers[name], torch_buffers[name])}"
+        )
+        assert check_node_equals_tensor(
+            bf_buffers[name], torch_buffers[name]
+        ), f"Value of param {name} for bf and torch are not equal."
+
+
 def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, print_stats=False, atol=1e-8):
     """Used to verify the output of a bf model and torch module are close."""
     bf_allclose_torch = check_node_allclose_tensor(out_bf, out_torch, atol=atol)
@@ -39,7 +56,7 @@ def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, 
 
 
 def check_bf_param_grads_allclose_torch(
-    bf_network: Network, torch_module: Module, atol=1e-6, print_output=False, use_assert=True
+    bf_network: Network, torch_module: Module, atol=1e-6, print_output=False, print_stats=True, use_assert=True
 ):
     """Used to verify that grad after backward passes for bf and torch are close for all params in the network."""
     bf_params = {name: param for name, param in bf_network.named_parameters()}
@@ -63,8 +80,8 @@ def check_bf_param_grads_allclose_torch(
                 diff = jnp.abs(bf_params[name].grad - torch_params[name].grad.numpy())
                 diff_df = pd.DataFrame(diff)
                 not_allclose_params.append(name)
-
-                print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
+                if print_stats:
+                    print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
 
     if use_assert:
         assert not not_allclose_params, f"Grad of params {not_allclose_params} for bf and torch are not within {atol}."
@@ -100,11 +117,17 @@ def check_dataclass_values_allclose(out_bf, out_torch, fieldname="root", print_s
         if is_dataclass(out_torch):
             for field in fields(out_torch):
                 check_dataclass_values_allclose(
-                    getattr(out_bf, field.name), getattr(out_torch, field.name), fieldname=field.name, print_stats=print_stats, atol=atol
+                    getattr(out_bf, field.name),
+                    getattr(out_torch, field.name),
+                    fieldname=field.name,
+                    print_stats=print_stats,
+                    atol=atol,
                 )
         elif isinstance(out_torch, (list, tuple)):
             for i in range(len(out_torch)):
-                check_dataclass_values_allclose(out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", print_stats=print_stats, atol=atol)
+                check_dataclass_values_allclose(
+                    out_bf[i], out_torch[i], fieldname=fieldname + ".tuple", print_stats=print_stats, atol=atol
+                )
         else:
             if out_torch is not None:
                 print(f"Comparing equality of torch object {type(out_torch)} with bf object {type(out_bf)}.")

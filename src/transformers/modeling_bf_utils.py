@@ -2140,7 +2140,7 @@ class BfPreTrainedModel(Network, BfModuleUtilsMixin):
         model.tie_weights()
 
         # Set model in evaluation mode to deactivate DropOut modules by default
-        model.eval()  # TODO: implement something so that dropout can go on/off
+        model.eval()
 
         if output_loading_info:
             if loading_info is None:
