@@ -56,7 +56,13 @@ def check_bf_model_outputs_match_torch_outputs(out_bf: Node, out_torch: Tensor, 
 
 
 def check_bf_param_grads_allclose_torch(
-    bf_network: Network, torch_module: Module, atol=1e-6, print_output=False, print_stats=True, use_assert=True
+    bf_network: Network,
+    torch_module: Module,
+    rtol=1e-3,
+    atol=1e-6,
+    print_output=False,
+    print_stats=True,
+    use_assert=True,
 ):
     """Used to verify that grad after backward passes for bf and torch are close for all params in the network."""
     bf_params = {name: param for name, param in bf_network.named_parameters()}
@@ -73,9 +79,9 @@ def check_bf_param_grads_allclose_torch(
             if not bf_grad_is_zero:
                 not_allclose_params.append(name)
         else:
-            is_allclose = jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), atol=atol)
+            is_allclose = jnp.allclose(bf_params[name].grad, torch_params[name].grad.numpy(), rtol=rtol, atol=atol)
             if print_output:
-                print(f"Grad of param {name} for bf and torch are within {atol}? {is_allclose}")
+                print(f"Grad of param {name} for bf and torch are within rtol={rtol}, atol={atol}? {is_allclose}")
             if not is_allclose:
                 diff = jnp.abs(bf_params[name].grad - torch_params[name].grad.numpy())
                 diff_df = pd.DataFrame(diff)
@@ -84,7 +90,9 @@ def check_bf_param_grads_allclose_torch(
                     print(f"\tStats on diff in grad for {name} between bf and torch: {diff_df.describe()}")
 
     if use_assert:
-        assert not not_allclose_params, f"Grad of params {not_allclose_params} for bf and torch are not within {atol}."
+        assert (
+            not not_allclose_params
+        ), f"Grad of params {not_allclose_params} for bf and torch are not within rtol={rtol}, atol={atol}."
 
 
 def check_equivalent_class(out_bf_model_output, out_torch_model_output):
