@@ -106,6 +106,9 @@ else:
         "BertLMHeadModel",
         "BertModel",
         "BertPreTrainedModel",
+        "BertOnlyMLMHead",
+        "BertPredictionHeadTransform",
+        "BertLMPredictionHead",
         "load_tf_weights_in_bert",
     ]
 
