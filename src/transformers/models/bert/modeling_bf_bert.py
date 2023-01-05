@@ -409,8 +409,10 @@ class BfBertAttention(Network):
             encoder_attention_mask,
             past_key_value,
             output_attentions,
-        )
-        attention_output = self.output(self_outputs[0], hidden_states)
+        )  # this calls selfattention (orange "Multi-Head attention") on the hidden states/input embeddings
+        attention_output = self.output(
+            self_outputs[0], hidden_states
+        )  # this combines the hidden states/input embeddings with the selfattention outputs and then normalizes
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
@@ -529,8 +531,12 @@ class BfBertLayer(Network):
         return outputs
 
     def feed_forward_chunk(self, attention_output):
-        intermediate_output = self.intermediate(attention_output)
-        layer_output = self.output(intermediate_output, attention_output)
+        intermediate_output = self.intermediate(
+            attention_output
+        )  # this is basically applying the (lilac) feed forward layer after the attention has been combined with the input embeddings
+        layer_output = self.output(
+            intermediate_output, attention_output
+        )  # attention_output is sorta like a skip layer here - it gets added with intermediate output and then normalized
         return layer_output
 
 
