@@ -154,22 +154,30 @@ class BfBertEmbeddings(Network):
 
     def __init__(self, config):
         super().__init__()
-        self.word_embeddings = Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
-        self.position_embeddings = Embedding(config.max_position_embeddings, config.hidden_size)
-        self.token_type_embeddings = Embedding(config.type_vocab_size, config.hidden_size)
+        self.word_embeddings = Embedding(
+            config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id, extra_name="word_embeddings"
+        )
+        self.position_embeddings = Embedding(
+            config.max_position_embeddings, config.hidden_size, extra_name="position_embeddings"
+        )
+        self.token_type_embeddings = Embedding(
+            config.type_vocab_size, config.hidden_size, extra_name="token_type_embeddings"
+        )
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
-        self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps, extra_name="in BfBertEmbeddings")
         self.dropout = Dropout(config.hidden_dropout_prob)
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
-        self.register_buffer("position_ids", bf.Node(jnp.expand_dims(jnp.arange(512), axis=0)))
-        # self.position_ids =
         self.register_buffer(
-            "token_type_ids", bf.Node(jnp.zeros(self.position_ids.shape, dtype=jnp.int64)), persistent=False
+            "position_ids", bf.Parameter(jnp.expand_dims(jnp.arange(512), axis=0), name="position_ids")
+        )
+        self.register_buffer(
+            "token_type_ids",
+            bf.Parameter(jnp.zeros(self.position_ids.shape, dtype=jnp.int64), name="position_ids"),
+            persistent=False,
         )  # todo is this 64 bit necessary?
-        # self.token_type_ids =
 
     def forward(
         self,
@@ -226,9 +234,9 @@ class BfBertSelfAttention(Network):
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
-        self.query = Linear(config.hidden_size, self.all_head_size)
-        self.key = Linear(config.hidden_size, self.all_head_size)
-        self.value = Linear(config.hidden_size, self.all_head_size)
+        self.query = Linear(config.hidden_size, self.all_head_size, extra_name="query")
+        self.key = Linear(config.hidden_size, self.all_head_size, extra_name="key")
+        self.value = Linear(config.hidden_size, self.all_head_size, extra_name="value")
 
         self.dropout = Dropout(config.attention_probs_dropout_prob)
         self.position_embedding_type = position_embedding_type or getattr(config, "position_embedding_type", "absolute")
@@ -304,12 +312,16 @@ class BfBertSelfAttention(Network):
                     f"Uhoh! When converting from torch to bf we expected key_length to be an int, but instead received type {type(key_length)}."
                 )
             if use_cache:
-                position_ids_l = bf.Node(
-                    jnp.array([[key_length - 1]], dtype=jnp.int64)
+                position_ids_l = bf.Parameter(
+                    jnp.array([[key_length - 1]], dtype=jnp.int64), name="position_ids_l"
                 )  # dtype=long - this basically does an expand_dim. Not sure whether the expand_dim/view ought to be tracked in the graph though
             else:
-                position_ids_l = bf.Node(jnp.expand_dims(jnp.arange(query_length, dtype=jnp.int64), axis=1))
-            position_ids_r = bf.Node(jnp.expand_dims(jnp.arange(key_length, dtype=jnp.int64), axis=1))
+                position_ids_l = bf.Parameter(
+                    jnp.expand_dims(jnp.arange(query_length, dtype=jnp.int64), axis=1), name="position_ids_l"
+                )
+            position_ids_r = bf.Parameter(
+                jnp.expand_dims(jnp.arange(key_length, dtype=jnp.int64), axis=1), name="position_ids_r"
+            )
             distance = position_ids_l - position_ids_r
 
             positional_embedding = self.distance_embedding(distance + self.max_position_embeddings - 1)
@@ -355,14 +367,17 @@ class BfBertSelfAttention(Network):
 class BfBertSelfOutput(Network):
     def __init__(self, config):
         super().__init__()
-        self.dense = Linear(config.hidden_size, config.hidden_size)
-        self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dropout = Dropout(config.hidden_dropout_prob)
+        self.dense = Linear(config.hidden_size, config.hidden_size, extra_name="in BfBertSelfOutput")
+        self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps, extra_name="in BfBertSelfOutput")
+        self.dropout = Dropout(config.hidden_dropout_prob, extra_name="in BfBertSelfOutput")
 
     def forward(self, hidden_states: bf.Node, input_tensor: bf.Node) -> bf.Node:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = hidden_states + input_tensor
+        hidden_states.name = "combine self_attention_output and bert attention input " + str(hash(self))
+        hidden_states = self.LayerNorm(hidden_states)
+
         return hidden_states
 
 
@@ -401,6 +416,7 @@ class BfBertAttention(Network):
         past_key_value: Optional[Tuple[Tuple[bf.Node]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[bf.Node]:
+        hidden_states.name = "input to bertattention " + str(hash(self))
         self_outputs = self.self(
             hidden_states,
             attention_mask,
@@ -420,7 +436,7 @@ class BfBertAttention(Network):
 class BfBertIntermediate(Network):
     def __init__(self, config):
         super().__init__()
-        self.dense = Linear(config.hidden_size, config.intermediate_size)
+        self.dense = Linear(config.hidden_size, config.intermediate_size, extra_name="in BfBertIntermediate")
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
@@ -435,14 +451,15 @@ class BfBertIntermediate(Network):
 class BfBertOutput(Network):
     def __init__(self, config):
         super().__init__()
-        self.dense = Linear(config.intermediate_size, config.hidden_size)
-        self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dropout = Dropout(config.hidden_dropout_prob)
+        self.dense = Linear(config.intermediate_size, config.hidden_size, extra_name="in BfBertOutput")
+        self.LayerNorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps, extra_name="in BfBertOutput")
+        self.dropout = Dropout(config.hidden_dropout_prob, extra_name="in BfBertOutput")
 
     def forward(self, hidden_states: bf.Node, input_tensor: bf.Node) -> bf.Node:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        # hidden_states.name = "add_and_norm attn_output and input tensor " + str(hash(self))
         return hidden_states
 
 
@@ -641,7 +658,7 @@ class BfBertEncoder(Network):
 class BfBertPooler(Network):
     def __init__(self, config):
         super().__init__()
-        self.dense = Linear(config.hidden_size, config.hidden_size)
+        self.dense = Linear(config.hidden_size, config.hidden_size, extra_name="in BfBertPooler")
         self.activation = Tanh()
         print("WARNING: TODO(KD) - when this is used, write some tests for this!")
 
@@ -657,7 +674,7 @@ class BfBertPooler(Network):
 class BfBertPredictionHeadTransform(Network):
     def __init__(self, config):
         super().__init__()
-        self.dense = Linear(config.hidden_size, config.hidden_size)
+        self.dense = Linear(config.hidden_size, config.hidden_size, extra_name="in BfBertPredictionHeadTransform")
         if isinstance(config.hidden_act, str):
             self.transform_act_fn = ACT2FN[config.hidden_act]
         else:
@@ -678,7 +695,7 @@ class BfBertLMPredictionHead(Network):
 
         # The output weights are the same as the input embeddings, but there is
         # an output-only bias for each token.
-        self.decoder = Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.decoder = Linear(config.hidden_size, config.vocab_size, bias=False, extra_name="in BfBertLMPredictionHead")
 
         self.bias = bf.Parameter(jnp.zeros(config.vocab_size))
 
@@ -919,8 +936,8 @@ class BfBertModel(BfBertPreTrainedModel):
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
 
         if attention_mask is None:
-            attention_mask = bf.Node(
-                jnp.ones((batch_size, seq_length + past_key_values_length))
+            attention_mask = bf.Parameter(
+                jnp.ones((batch_size, seq_length + past_key_values_length)), name="attention_mask"
             )  # KD: should this be a Node?
 
         if token_type_ids is None:
@@ -929,7 +946,7 @@ class BfBertModel(BfBertPreTrainedModel):
                 buffered_token_type_ids_expanded = bf.repeat(buffered_token_type_ids, n=input_shape[0], axis=0)
                 token_type_ids = buffered_token_type_ids_expanded
             else:
-                token_type_ids = bf.Node(jnp.zeros(input_shape, dtype=jnp.int64))
+                token_type_ids = bf.Parameter(jnp.zeros(input_shape, dtype=jnp.int64), name="token_type_ids")
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
@@ -943,7 +960,7 @@ class BfBertModel(BfBertPreTrainedModel):
             encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.shape
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             if encoder_attention_mask is None:
-                encoder_attention_mask = bf.Node(jnp.ones(encoder_hidden_shape))
+                encoder_attention_mask = bf.Parameter(jnp.ones(encoder_hidden_shape), name="encoder_attention_mask")
             encoder_extended_attention_mask = self.invert_attention_mask(
                 encoder_attention_mask
             )  # TODO(KD): implement this when we need to use decoders!
