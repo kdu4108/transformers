@@ -231,7 +231,9 @@ class BfBertSelfAttention(Network):
             )
 
         self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.attention_head_size = int(
+            config.hidden_size / config.num_attention_heads
+        )  # attention head size if a function of hidden size and num attention heads
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
         self.query = Linear(config.hidden_size, self.all_head_size, extra_name="query")
@@ -247,10 +249,16 @@ class BfBertSelfAttention(Network):
         self.is_decoder = config.is_decoder
 
     def transpose_for_scores(self, x: bf.Node) -> bf.Node:
-        new_x_shape = x.shape[:-1] + (self.num_attention_heads, self.attention_head_size)
+        # x.shape = (bs, seq_len, hidden_sz)
+        new_x_shape = x.shape[:-1] + (
+            self.num_attention_heads,
+            self.attention_head_size,
+        )  # shape=(bs, seq_len, num_attn_heads, attn_head_size) (where num_attn_heads, attn_head_size == hidden_size)
         # x = x.view(new_x_shape)
         x = bf.reshape(x, new_x_shape)
-        return bf.transpose(x, axes=(0, 2, 1, 3))
+        return bf.transpose(
+            x, axes=(0, 2, 1, 3)
+        )  # shape=(bs, num_attn_heads, seq_len, attn_head_size) - you can slice out the (attn_head_size,) matrix for each token for each head for each sentence and analyze paths from there.
 
     def forward(
         self,
@@ -263,6 +271,7 @@ class BfBertSelfAttention(Network):
         output_attentions: Optional[bool] = False,
     ) -> Tuple[bf.Node]:
         mixed_query_layer = self.query(hidden_states)
+        mixed_query_layer.name = "bertselfattention mixed_query_layer"
 
         # If this is instantiated as a cross-attention module, the keys
         # and values come from an encoder; the attention mask needs to be
@@ -285,7 +294,9 @@ class BfBertSelfAttention(Network):
             value_layer = bf.concat([past_key_value[1], value_layer], axis=2)
         else:  # this is the branch for a normal BertMLM use
             key_layer = self.transpose_for_scores(self.key(hidden_states))
+            key_layer.name = "bertselfattention key"
             value_layer = self.transpose_for_scores(self.value(hidden_states))
+            value_layer.name = "bertselfattention value"
 
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
@@ -697,7 +708,7 @@ class BfBertLMPredictionHead(Network):
         # an output-only bias for each token.
         self.decoder = Linear(config.hidden_size, config.vocab_size, bias=False, extra_name="in BfBertLMPredictionHead")
 
-        self.bias = bf.Parameter(jnp.zeros(config.vocab_size))
+        self.bias = bf.Parameter(jnp.zeros(config.vocab_size), name="BfBertLMPredictionHead bias")
 
         # Need a link between the two variables so that the bias is correctly resized with `resize_token_embeddings`
         self.decoder.bias = self.bias
