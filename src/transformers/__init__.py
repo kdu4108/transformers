@@ -1052,6 +1052,7 @@ else:
             "BfBertPreTrainedModel",
             "BfBertModel",
             "BfBertForMaskedLM",
+            "BfBertForSequenceClassification",
         ]
     )
 

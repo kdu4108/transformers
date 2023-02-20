@@ -66,6 +66,7 @@ else:
         "BfBertPreTrainedModel",
         "BfBertModel",
         "BfBertForMaskedLM",
+        "BfBertForSequenceClassification",
         # "BertForMaskedLM",
         # "BertForMultipleChoice",
         # "BertForNextSentencePrediction",

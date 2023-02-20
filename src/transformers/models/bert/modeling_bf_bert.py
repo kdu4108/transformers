@@ -18,6 +18,7 @@
 import brunoflow as bf
 from brunoflow.net import CrossEntropyLoss, Dropout, Embedding, LayerNorm, Linear, ModuleList, Network, Tanh
 from jax import numpy as jnp
+import numpy as np
 import math
 import os
 import warnings
@@ -29,6 +30,7 @@ from ...modeling_bf_outputs import (
     BfBaseModelOutputWithPastAndCrossAttentions,
     BfBaseModelOutputWithPoolingAndCrossAttentions,
     BfMaskedLMOutput,
+    BfSequenceClassifierOutput,
 )
 from ...modeling_bf_utils import BfPreTrainedModel
 from ...bf_utils import apply_chunking_to_forward, find_pruneable_heads_and_indices, prune_linear_layer
@@ -743,9 +745,23 @@ class BfBertPreTrainedModel(BfPreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights"""
-        print(
-            "WARNING: we don't actually initialize weights here! If we ever need to actually train we can properly implement this."
-        )
+        # print(
+        #     "WARNING: we don't actually initialize weights here! If we ever need to actually train we can properly implement this."
+        # )
+        if isinstance(module, Linear):
+            module.set_weights(
+                jnp.array(np.random.normal(loc=0.0, scale=self.config.initializer_range, size=module.weight.shape))
+            )
+            if module.bias is not None:
+                module.set_bias(jnp.zeros_like(module.bias.val))
+        elif isinstance(module, Embedding):
+            module.weight.val = jnp.array(
+                np.random.normal(loc=0.0, scale=self.config.initializer_range, size=module.weight.shape)
+            )
+            module._fill_padding_idx_with_zero()
+        elif isinstance(module, LayerNorm):
+            module.bias.val = jnp.zeros_like(module.bias.val)
+            module.weight.val = jnp.ones_like(module.weight.val)
         return
         # raise NotImplementedError("This isn't implemented yet because we don't need it!")
         # if isinstance(module, Linear):
@@ -1133,3 +1149,94 @@ class BfBertForMaskedLM(BfBertPreTrainedModel):
         # input_ids = torch.cat([input_ids, dummy_token], dim=1)
 
         # return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
+class BfBertForSequenceClassification(BfBertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
+        self.bert = BfBertModel(config)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = Dropout(classifier_dropout)
+        self.classifier = Linear(config.hidden_size, config.num_labels)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def forward(
+        self,
+        input_ids: Optional[bf.Node] = None,
+        attention_mask: Optional[bf.Node] = None,
+        token_type_ids: Optional[bf.Node] = None,
+        position_ids: Optional[bf.Node] = None,
+        head_mask: Optional[bf.Node] = None,
+        inputs_embeds: Optional[bf.Node] = None,
+        labels: Optional[bf.Node] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple[bf.Node], BfSequenceClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                self.config.problem_type = "single_label_classification"
+                # if self.num_labels == 1:
+                #     self.config.problem_type = "regression"
+                # elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                #     self.config.problem_type = "single_label_classification"
+                # else:
+                #     self.config.problem_type = "multi_label_classification"
+
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(bf.reshape(logits, newshape=(-1, self.num_labels)), bf.reshape(labels, newshape=-1))
+            # if self.config.problem_type == "regression":
+            #     loss_fct = MSELoss()
+            #     if self.num_labels == 1:
+            #         loss = loss_fct(logits.squeeze(), labels.squeeze())
+            #     else:
+            #         loss = loss_fct(logits, labels)
+            # elif self.config.problem_type == "single_label_classification":
+            #     loss_fct = CrossEntropyLoss()
+            #     loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            # elif self.config.problem_type == "multi_label_classification":
+            #     loss_fct = BCEWithLogitsLoss()
+            #     loss = loss_fct(logits, labels)
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return BfSequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
