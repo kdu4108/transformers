@@ -173,7 +173,8 @@ class BfBertEmbeddings(Network):
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
         self.register_buffer(
-            "position_ids", bf.Parameter(jnp.expand_dims(jnp.arange(512), axis=0), name="position_ids")
+            "position_ids",
+            bf.Parameter(jnp.expand_dims(jnp.arange(config.max_position_embeddings), axis=0), name="position_ids"),
         )
         self.register_buffer(
             "token_type_ids",
